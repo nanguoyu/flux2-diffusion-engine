@@ -22,6 +22,7 @@ let package = Package(
             dependencies: [
                 .product(name: "DiffusionCore", package: "swift-diffusion-core"),
                 .product(name: "Flux2Core", package: "flux-2-swift-mlx"),
+                .product(name: "FluxTextEncoders", package: "flux-2-swift-mlx"),
             ]
         ),
         // Minimal CLI: `swift run flux2-demo "your prompt"` — loads FLUX.2 Klein 4B (downloads

@@ -2,6 +2,10 @@ import Foundation
 import CoreGraphics
 import DiffusionCore
 import Flux2Core
+// Selective imports: FluxTextEncoders also defines `ModelVariant`, which would clash with the
+// catalog's `ModelVariant` used in this engine's signatures — pull in only what we need.
+import enum FluxTextEncoders.Qwen3Variant
+import class FluxTextEncoders.TextEncoderModelDownloader
 
 /// A `DiffusionEngine` facade over flux-2-swift-mlx's monolithic `Flux2Pipeline`.
 ///
@@ -35,41 +39,81 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                                   note: fits ? "Runs on Mac" : "Insufficient memory")
     }
 
-    /// Whether FLUX's required weights (transformer + VAE) are already on disk. Constructing a
-    /// `Flux2Pipeline` does not download anything, so this is a cheap on-disk check that mirrors
-    /// what `load` would otherwise fetch. The default quantization matches `init`'s.
+    /// The Qwen3 text-encoder variants Klein 4B can use. `KleinTextEncoder` reuses whichever is
+    /// present (preferring 8-bit); a fresh memory-efficient install fetches the 4-bit one.
+    private static let kleinEncoderVariants: [Qwen3Variant] = [.qwen3_4B_8bit, .qwen3_4B_4bit]
+
+    private static var encoderDownloaded: Bool {
+        kleinEncoderVariants.contains { TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: $0) }
+    }
+
+    /// Whether FLUX is fully on disk — transformer + VAE *and* the Qwen3 text encoder. Constructing
+    /// a `Flux2Pipeline` downloads nothing, so this is a cheap on-disk check.
     public static func isDownloaded(quantization: Flux2QuantizationConfig = .memoryEfficient) -> Bool {
-        Flux2Pipeline(model: .klein4B, quantization: quantization).hasRequiredModels
+        Flux2Pipeline(model: .klein4B, quantization: quantization).hasRequiredModels && encoderDownloaded
     }
 
-    /// Total bytes of FLUX weights currently on disk, for storage reporting.
+    /// Total bytes of FLUX weights on disk: model components + the Qwen3 text encoder.
     public static func downloadedBytes() -> Int64 {
-        Flux2ModelDownloader.downloadedSize()
+        var total = Flux2ModelDownloader.downloadedSize()
+        for variant in kleinEncoderVariants {
+            if let path = TextEncoderModelDownloader.findQwen3ModelPath(for: variant) {
+                total += directorySize(at: path)
+            }
+        }
+        return total
     }
 
-    /// Pre-download FLUX's model weights (the components `load` needs that aren't yet on disk),
-    /// reporting 0...1 progress, without loading them into memory. FLUX.2's large shared text
-    /// encoder is fetched by the engine on first generation and is not part of this download.
+    /// Pre-download everything FLUX needs — transformer, VAE, and the Qwen3 text encoder —
+    /// reporting 0...1 progress, without loading anything into memory.
     public static func download(quantization: Flux2QuantizationConfig = .memoryEfficient,
                                 progress: @Sendable @escaping (Double) -> Void) async throws {
         let pipeline = Flux2Pipeline(model: .klein4B, quantization: quantization)
-        let downloader = Flux2ModelDownloader()
         let missing = pipeline.missingModels
-        guard !missing.isEmpty else { progress(1); return }
-        for (index, component) in missing.enumerated() {
-            _ = try await downloader.download(component, progress: { fraction, _ in
-                progress((Double(index) + fraction) / Double(missing.count))
+        let needsEncoder = !encoderDownloaded
+        let steps = missing.count + (needsEncoder ? 1 : 0)
+        guard steps > 0 else { progress(1); return }
+
+        var done = 0
+        let modelDownloader = Flux2ModelDownloader()
+        for component in missing {
+            let base = done
+            _ = try await modelDownloader.download(component, progress: { fraction, _ in
+                progress((Double(base) + fraction) / Double(steps))
+            })
+            done += 1
+        }
+        if needsEncoder {
+            let base = done
+            let encoderDownloader = TextEncoderModelDownloader()
+            _ = try await encoderDownloader.downloadQwen3(variant: .qwen3_4B_4bit, progress: { fraction, _ in
+                progress((Double(base) + fraction) / Double(steps))
             })
         }
         progress(1)
     }
 
-    /// Remove FLUX's downloaded weights from disk to free space.
+    /// Remove FLUX's downloaded weights — model components and the Qwen3 text encoder — to free space.
     public static func deleteWeights() throws {
         let dir = ModelRegistry.modelsDirectory
         if FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.removeItem(at: dir)
         }
+        for variant in kleinEncoderVariants {
+            if let path = TextEncoderModelDownloader.findQwen3ModelPath(for: variant) {
+                try? FileManager.default.removeItem(at: path)
+            }
+        }
+    }
+
+    private static func directorySize(at url: URL) -> Int64 {
+        guard let walker = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let fileURL as URL in walker {
+            total += Int64((try? fileURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0)
+        }
+        return total
     }
 
     /// `source` is intentionally ignored: `Flux2Pipeline` downloads and loads its own weights
