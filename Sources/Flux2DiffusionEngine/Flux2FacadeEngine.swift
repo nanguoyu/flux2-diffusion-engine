@@ -156,6 +156,77 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         }
     }
 
+    // MARK: - Component-level management
+
+    /// One downloadable FLUX weight component (a specific transformer/encoder precision or the VAE).
+    public struct Flux2ComponentInfo: Identifiable, Sendable {
+        public enum Kind: String, Sendable { case transformer = "Transformer", textEncoder = "Text encoder", vae = "VAE" }
+        public let id: String
+        public let title: String
+        public let subtitle: String
+        public let kind: Kind
+        public let repo: String
+        public let bytes: Int64
+        public let isDownloaded: Bool
+    }
+
+    /// Every individually-managed FLUX component, with on-disk size when present (else an estimate).
+    public static func allComponents() -> [Flux2ComponentInfo] {
+        func gib(_ g: Double) -> Int64 { Int64(g * 1_073_741_824) }
+        func size(_ down: Bool, _ path: URL?, _ estimate: Int64) -> Int64 {
+            (down ? path.map { directorySize(at: $0) } : nil) ?? estimate
+        }
+        func tx(_ v: ModelRegistry.TransformerVariant, _ est: Int64) -> (Bool, Int64) {
+            let down = Flux2ModelDownloader.isDownloaded(.transformer(v))
+            return (down, size(down, Flux2ModelDownloader.findModelPath(for: .transformer(v)), est))
+        }
+        func enc(_ v: Qwen3Variant, _ est: Int64) -> (Bool, Int64) {
+            let down = TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: v)
+            return (down, size(down, TextEncoderModelDownloader.findQwen3ModelPath(for: v), est))
+        }
+        let txBF = tx(.klein4B_bf16, gib(7.2)), tx8 = tx(.klein4B_8bit, gib(3.3))
+        let e8 = enc(.qwen3_4B_8bit, gib(4.0)), e4 = enc(.qwen3_4B_4bit, gib(1.9))
+        let vaeDown = Flux2ModelDownloader.isDownloaded(.vae(.smallDecoder))
+        let vaeBytes = size(vaeDown, Flux2ModelDownloader.findModelPath(for: .vae(.smallDecoder)), gib(0.57))
+        return [
+            .init(id: "tx-bf16", title: "Klein 4B · 16-bit", subtitle: "also serves 4-bit (quantizes on load)",
+                  kind: .transformer, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: txBF.1, isDownloaded: txBF.0),
+            .init(id: "tx-8bit", title: "Klein 4B · 8-bit", subtitle: "",
+                  kind: .transformer, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: tx8.1, isDownloaded: tx8.0),
+            .init(id: "enc-8bit", title: "Qwen3 4B · 8-bit", subtitle: "better prompt fidelity",
+                  kind: .textEncoder, repo: "lmstudio-community/Qwen3-4B-MLX-8bit", bytes: e8.1, isDownloaded: e8.0),
+            .init(id: "enc-4bit", title: "Qwen3 4B · 4-bit", subtitle: "smaller",
+                  kind: .textEncoder, repo: "lmstudio-community/Qwen3-4B-MLX-4bit", bytes: e4.1, isDownloaded: e4.0),
+            .init(id: "vae", title: "Small VAE Decoder", subtitle: "recommended default",
+                  kind: .vae, repo: "black-forest-labs/FLUX.2-small-decoder", bytes: vaeBytes, isDownloaded: vaeDown),
+        ]
+    }
+
+    /// Download a single component by its `Flux2ComponentInfo.id`, reporting 0...1 progress.
+    public static func downloadComponent(_ id: String, progress: @Sendable @escaping (Double) -> Void) async throws {
+        switch id {
+        case "tx-bf16": _ = try await Flux2ModelDownloader().download(.transformer(.klein4B_bf16), progress: { f, _ in progress(f) })
+        case "tx-8bit": _ = try await Flux2ModelDownloader().download(.transformer(.klein4B_8bit), progress: { f, _ in progress(f) })
+        case "enc-8bit": _ = try await TextEncoderModelDownloader().downloadQwen3(variant: .qwen3_4B_8bit, progress: { f, _ in progress(f) })
+        case "enc-4bit": _ = try await TextEncoderModelDownloader().downloadQwen3(variant: .qwen3_4B_4bit, progress: { f, _ in progress(f) })
+        case "vae": _ = try await Flux2ModelDownloader().download(.vae(.smallDecoder), progress: { f, _ in progress(f) })
+        default: break
+        }
+        progress(1)
+    }
+
+    /// Delete a single component's weights by its `Flux2ComponentInfo.id`.
+    public static func deleteComponent(_ id: String) throws {
+        switch id {
+        case "tx-bf16": try Flux2ModelDownloader.delete(.transformer(.klein4B_bf16))
+        case "tx-8bit": try Flux2ModelDownloader.delete(.transformer(.klein4B_8bit))
+        case "enc-8bit": if let p = TextEncoderModelDownloader.findQwen3ModelPath(for: .qwen3_4B_8bit) { try FileManager.default.removeItem(at: p) }
+        case "enc-4bit": if let p = TextEncoderModelDownloader.findQwen3ModelPath(for: .qwen3_4B_4bit) { try FileManager.default.removeItem(at: p) }
+        case "vae": try Flux2ModelDownloader.delete(.vae(.smallDecoder))
+        default: break
+        }
+    }
+
     private static func directorySize(at url: URL) -> Int64 {
         guard let walker = FileManager.default.enumerator(
             at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
