@@ -32,6 +32,12 @@ let package = Package(
                 "Flux2DiffusionEngine",
                 .product(name: "DiffusionCore", package: "swift-diffusion-core"),
                 .product(name: "MLX", package: "mlx-swift"),
+            ],
+            linkerSettings: [
+                // MLX's Cmlx links libc++ via `@rpath/libc++.1.dylib`, but `swift run` on
+                // Xcode 26 / Swift 6.2 embeds rpaths that don't include the system lib dir, so
+                // dyld can't resolve it. Add /usr/lib (where libc++ lives in the shared cache).
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "/usr/lib"]),
             ]
         ),
     ]
