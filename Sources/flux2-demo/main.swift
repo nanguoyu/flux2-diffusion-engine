@@ -9,7 +9,7 @@ import Flux2DiffusionEngine
 // Minimal end-to-end runner for the FLUX.2 facade engine:
 //   swift run flux2-demo "a calm otter on a mossy river stone, soft morning light"
 // Loads FLUX.2 Klein 4B (downloads weights from HuggingFace on first run) and writes
-// flux-out.png. Requires a Metal GPU (macOS 14+).
+// flux-out.png. Requires a Metal GPU (macOS 15+).
 
 /// The facade ignores `source` (Flux2Pipeline loads its own weights), so a null source suffices.
 struct NullWeightSource: WeightSource {

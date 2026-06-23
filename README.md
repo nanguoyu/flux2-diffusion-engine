@@ -5,7 +5,7 @@ monolithic `Flux2Pipeline` behind [`swift-diffusion-core`](https://github.com/na
 `DiffusionEngine`.
 
 FLUX.2 exposes only a whole-pipeline `generateTextToImage(...)` (no per-block streaming) and the
-package targets macOS 14+, so it can't use the block-streaming engine in the core and can't build
+package targets macOS 15+, so it can't use the block-streaming engine in the core and can't build
 for iOS. It therefore lives in its own package, linked only by the macOS app target.
 
 ```swift
