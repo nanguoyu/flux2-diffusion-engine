@@ -3,11 +3,11 @@ import PackageDescription
 
 // flux2-diffusion-engine — a macOS-only facade that wraps the monolithic flux-2-swift-mlx
 // `Flux2Pipeline` behind swift-diffusion-core's `DiffusionEngine`. FLUX.2 cannot be block-
-// streamed (no per-block API) and the package is macOS-15-only, so it lives outside the core
+// streamed (no per-block API) and the package is macOS-only (14+), so it lives outside the core
 // (which targets iOS too) and is linked only by the macOS app target.
 let package = Package(
     name: "flux2-diffusion-engine",
-    platforms: [.macOS("15.0")],
+    platforms: [.macOS(.v14)],
     products: [
         .library(name: "Flux2DiffusionEngine", targets: ["Flux2DiffusionEngine"]),
     ],
