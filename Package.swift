@@ -14,6 +14,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/nanguoyu/swift-diffusion-core", branch: "main"),
         .package(url: "https://github.com/nanguoyu/flux-2-swift-mlx", branch: "main"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.0"),
     ],
     targets: [
         .target(
@@ -21,6 +22,16 @@ let package = Package(
             dependencies: [
                 .product(name: "DiffusionCore", package: "swift-diffusion-core"),
                 .product(name: "Flux2Core", package: "flux-2-swift-mlx"),
+            ]
+        ),
+        // Minimal CLI: `swift run flux2-demo "your prompt"` — loads FLUX.2 Klein 4B (downloads
+        // weights on first run) and writes flux-out.png. Requires a Metal GPU (macOS).
+        .executableTarget(
+            name: "flux2-demo",
+            dependencies: [
+                "Flux2DiffusionEngine",
+                .product(name: "DiffusionCore", package: "swift-diffusion-core"),
+                .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
     ]
