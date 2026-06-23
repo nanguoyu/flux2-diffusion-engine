@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 import DiffusionCore
 import Flux2Core
@@ -44,6 +45,31 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     /// Total bytes of FLUX weights currently on disk, for storage reporting.
     public static func downloadedBytes() -> Int64 {
         Flux2ModelDownloader.downloadedSize()
+    }
+
+    /// Pre-download FLUX's model weights (the components `load` needs that aren't yet on disk),
+    /// reporting 0...1 progress, without loading them into memory. FLUX.2's large shared text
+    /// encoder is fetched by the engine on first generation and is not part of this download.
+    public static func download(quantization: Flux2QuantizationConfig = .memoryEfficient,
+                                progress: @Sendable @escaping (Double) -> Void) async throws {
+        let pipeline = Flux2Pipeline(model: .klein4B, quantization: quantization)
+        let downloader = Flux2ModelDownloader()
+        let missing = pipeline.missingModels
+        guard !missing.isEmpty else { progress(1); return }
+        for (index, component) in missing.enumerated() {
+            _ = try await downloader.download(component, progress: { fraction, _ in
+                progress((Double(index) + fraction) / Double(missing.count))
+            })
+        }
+        progress(1)
+    }
+
+    /// Remove FLUX's downloaded weights from disk to free space.
+    public static func deleteWeights() throws {
+        let dir = ModelRegistry.modelsDirectory
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.removeItem(at: dir)
+        }
     }
 
     /// `source` is intentionally ignored: `Flux2Pipeline` downloads and loads its own weights
