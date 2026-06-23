@@ -10,8 +10,13 @@ import Flux2Core
 /// macOS-15+ and Metal-backed).
 public actor Flux2FacadeEngine: DiffusionEngine {
     private var pipeline: Flux2Pipeline?
+    private let quantization: Flux2QuantizationConfig
 
-    public init() {}
+    /// `quantization` trades quality for memory/download size: `.highQuality` (bf16),
+    /// `.balanced` (8-bit), or `.memoryEfficient` (4-bit text encoder + int8 transformer).
+    public init(quantization: Flux2QuantizationConfig = .memoryEfficient) {
+        self.quantization = quantization
+    }
 
     public static func capabilities(for model: DiffusionModel, variant: ModelVariant,
                                     on device: DeviceTier) -> EngineCapabilities {
@@ -29,7 +34,6 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     public func load(_ model: DiffusionModel, variant: ModelVariant, source: WeightSource,
                      progress: @Sendable @escaping (Double) -> Void) async throws {
         let fluxModel: Flux2Model = .klein4B   // the catalog currently ships Klein 4B
-        let quantization: Flux2QuantizationConfig = (variant.precision == .q4) ? .memoryEfficient : .balanced
         let pipeline = Flux2Pipeline(model: fluxModel, quantization: quantization)
         try await pipeline.loadModels(progressCallback: { fraction, _ in progress(fraction) })
         self.pipeline = pipeline
@@ -39,16 +43,32 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                          progress: @Sendable @escaping (GenerationProgress) -> Void) async throws -> CGImage {
         guard let pipeline else { throw EngineError.notLoaded }
         progress(.preparing)
-        let image = try await pipeline.generateTextToImage(
-            prompt: request.prompt,
-            height: request.size.height,
-            width: request.size.width,
-            steps: request.steps,
-            guidance: request.guidance,
-            seed: request.seed,
-            onProgress: { current, total in
-                progress(.denoising(step: current, total: total, preview: nil))
-            })
+        let image: CGImage
+        if let reference = request.referenceImage {
+            // image-to-image: FLUX.2 takes the reference image(s) directly.
+            image = try await pipeline.generateImageToImage(
+                prompt: request.prompt,
+                images: [reference],
+                height: request.size.height,
+                width: request.size.width,
+                steps: request.steps,
+                guidance: request.guidance,
+                seed: request.seed,
+                onProgress: { current, total in
+                    progress(.denoising(step: current, total: total, preview: nil))
+                })
+        } else {
+            image = try await pipeline.generateTextToImage(
+                prompt: request.prompt,
+                height: request.size.height,
+                width: request.size.width,
+                steps: request.steps,
+                guidance: request.guidance,
+                seed: request.seed,
+                onProgress: { current, total in
+                    progress(.denoising(step: current, total: total, preview: nil))
+                })
+        }
         progress(.finished(image))
         return image
     }

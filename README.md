@@ -23,9 +23,18 @@ changed (`applySingle` state `TupleState` → `AdamState`, and the init is no lo
 overridable designated initializer). Since `Training/` lives in the same `Flux2Core`
 module, this blocks inference consumers too.
 
-**Fix in flux-2-swift-mlx** (either): move `Training/` to its own target so inference-only
-consumers skip it (recommended — also faster to build), or update `ResumableAdamW` for the
-new optimizer API. After that, this package compiles.
+**Fixed** via [flux-2-swift-mlx PR #1](https://github.com/nanguoyu/flux-2-swift-mlx/pull/1)
+(`ResumableAdamW` updated for mlx-swift 0.31's `AdamState`). This package now compiles and
+**runs** (validated: real FLUX.2 Klein image generated).
+
+### Running `flux2-demo`
+- **Via Xcode** (recommended): `xed .`, run the `flux2-demo` scheme. Xcode compiles MLX's
+  Metal shader lib automatically.
+- **Via `swift run`** on Xcode 26 needs two one-time fixes the CLI build doesn't do itself:
+  1. the executable target already adds `/usr/lib` to its rpath (resolves `@rpath/libc++.1.dylib`);
+  2. `swift build` does **not** compile MLX's `default.metallib`. Build once in Xcode, then copy
+     its `mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` to `mlx.metallib` beside the
+     `swift run` executable (`.build/<triple>/debug/mlx.metallib`). After that, `swift run flux2-demo "…"` works.
 
 ## License
 
