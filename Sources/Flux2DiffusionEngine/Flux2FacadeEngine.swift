@@ -227,6 +227,15 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         }
     }
 
+    /// The component ids a given precision actually uses (the "active recipe"). 16-bit and 4-bit
+    /// transformer both run off the bf16 file (4-bit quantizes on load).
+    public static func activeComponentIDs(transformer: FluxTransformerPrecision,
+                                          encoder: FluxEncoderPrecision) -> [String] {
+        let tx = (transformer == .bit8) ? "tx-8bit" : "tx-bf16"
+        let enc = (encoder == .bit8) ? "enc-8bit" : "enc-4bit"
+        return [tx, enc, "vae"]
+    }
+
     private static func directorySize(at url: URL) -> Int64 {
         guard let walker = FileManager.default.enumerator(
             at: url, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
