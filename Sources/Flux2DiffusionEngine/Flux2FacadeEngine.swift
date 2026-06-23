@@ -23,6 +23,11 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         self.quantization = quantization
     }
 
+    /// Convenience init from the app-facing precision options.
+    public init(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision) {
+        self.quantization = Self.quantization(transformer: transformer, encoder: encoder)
+    }
+
     public static func capabilities(for model: DiffusionModel, variant: ModelVariant,
                                     on device: DeviceTier) -> EngineCapabilities {
         if device.isPhone {
@@ -39,24 +44,69 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                                   note: fits ? "Runs on Mac" : "Insufficient memory")
     }
 
-    /// The Qwen3 text-encoder variants Klein 4B can use. `KleinTextEncoder` reuses whichever is
-    /// present (preferring 8-bit); a fresh memory-efficient install fetches the 4-bit one.
-    private static let kleinEncoderVariants: [Qwen3Variant] = [.qwen3_4B_8bit, .qwen3_4B_4bit]
-
-    private static var encoderDownloaded: Bool {
-        kleinEncoderVariants.contains { TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: $0) }
+    /// App-facing precision options for Klein 4B's transformer.
+    public enum FluxTransformerPrecision: String, CaseIterable, Sendable, Identifiable {
+        case bit16, bit8, bit4
+        public var id: String { rawValue }
+        public var label: String { switch self { case .bit16: return "16-bit"; case .bit8: return "8-bit"; case .bit4: return "4-bit" } }
+        public var note: String {
+            switch self {
+            case .bit16: return "highest quality · ~8 GB"
+            case .bit8: return "balanced · ~4 GB"
+            case .bit4: return "lowest memory · ~8 GB, quantizes on load"
+            }
+        }
+        var quant: TransformerQuantization { switch self { case .bit16: return .bf16; case .bit8: return .qint8; case .bit4: return .int4 } }
     }
 
-    /// Whether FLUX is fully on disk — transformer + VAE *and* the Qwen3 text encoder. Constructing
-    /// a `Flux2Pipeline` downloads nothing, so this is a cheap on-disk check.
+    /// App-facing precision options for the Qwen3 text encoder.
+    public enum FluxEncoderPrecision: String, CaseIterable, Sendable, Identifiable {
+        case bit8, bit4
+        public var id: String { rawValue }
+        public var label: String { switch self { case .bit8: return "8-bit"; case .bit4: return "4-bit" } }
+        public var note: String { switch self { case .bit8: return "better prompt fidelity · ~4 GB"; case .bit4: return "smaller · ~2 GB" } }
+        var mistral: MistralQuantization { switch self { case .bit8: return .mlx8bit; case .bit4: return .mlx4bit } }
+        var qwen3: Qwen3Variant { switch self { case .bit8: return .qwen3_4B_8bit; case .bit4: return .qwen3_4B_4bit } }
+    }
+
+    /// Build a flux quantization config from the app-facing precision options.
+    public static func quantization(transformer: FluxTransformerPrecision = .bit8,
+                                    encoder: FluxEncoderPrecision = .bit8) -> Flux2QuantizationConfig {
+        Flux2QuantizationConfig(textEncoder: encoder.mistral, transformer: transformer.quant)
+    }
+
+    /// Precision-keyed convenience over `isDownloaded(quantization:)` so callers need not name the
+    /// flux config type.
+    public static func isDownloaded(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision) -> Bool {
+        isDownloaded(quantization: quantization(transformer: transformer, encoder: encoder))
+    }
+
+    /// Precision-keyed convenience over `download(quantization:progress:)`.
+    public static func download(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision,
+                                progress: @Sendable @escaping (Double) -> Void) async throws {
+        try await download(quantization: quantization(transformer: transformer, encoder: encoder), progress: progress)
+    }
+
+    /// The Qwen3 text-encoder variant a given config resolves to (mirrors `KleinTextEncoder`).
+    private static func qwen3Variant(for config: Flux2QuantizationConfig) -> Qwen3Variant {
+        switch config.textEncoder {
+        case .bf16, .mlx8bit: return .qwen3_4B_8bit
+        case .mlx6bit, .mlx4bit: return .qwen3_4B_4bit
+        }
+    }
+
+    /// Whether FLUX is fully on disk for the given precision — transformer + VAE *and* the matching
+    /// Qwen3 text encoder. Constructing a `Flux2Pipeline` downloads nothing, so this is cheap.
     public static func isDownloaded(quantization: Flux2QuantizationConfig = .memoryEfficient) -> Bool {
-        Flux2Pipeline(model: .klein4B, quantization: quantization).hasRequiredModels && encoderDownloaded
+        let pipeline = Flux2Pipeline(model: .klein4B, quantization: quantization)
+        return pipeline.hasRequiredModels
+            && TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: qwen3Variant(for: quantization))
     }
 
-    /// Total bytes of FLUX weights on disk: model components + the Qwen3 text encoder.
+    /// Total bytes of FLUX weights on disk: model components + any downloaded Qwen3 text encoders.
     public static func downloadedBytes() -> Int64 {
         var total = Flux2ModelDownloader.downloadedSize()
-        for variant in kleinEncoderVariants {
+        for variant in [Qwen3Variant.qwen3_4B_8bit, .qwen3_4B_4bit] {
             if let path = TextEncoderModelDownloader.findQwen3ModelPath(for: variant) {
                 total += directorySize(at: path)
             }
@@ -64,13 +114,14 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         return total
     }
 
-    /// Pre-download everything FLUX needs — transformer, VAE, and the Qwen3 text encoder —
-    /// reporting 0...1 progress, without loading anything into memory.
+    /// Pre-download everything FLUX needs for the given precision — transformer, VAE, and the
+    /// matching Qwen3 text encoder — reporting 0...1 progress, without loading into memory.
     public static func download(quantization: Flux2QuantizationConfig = .memoryEfficient,
                                 progress: @Sendable @escaping (Double) -> Void) async throws {
         let pipeline = Flux2Pipeline(model: .klein4B, quantization: quantization)
         let missing = pipeline.missingModels
-        let needsEncoder = !encoderDownloaded
+        let encoder = qwen3Variant(for: quantization)
+        let needsEncoder = !TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: encoder)
         let steps = missing.count + (needsEncoder ? 1 : 0)
         guard steps > 0 else { progress(1); return }
 
@@ -85,8 +136,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         }
         if needsEncoder {
             let base = done
-            let encoderDownloader = TextEncoderModelDownloader()
-            _ = try await encoderDownloader.downloadQwen3(variant: .qwen3_4B_4bit, progress: { fraction, _ in
+            _ = try await TextEncoderModelDownloader().downloadQwen3(variant: encoder, progress: { fraction, _ in
                 progress((Double(base) + fraction) / Double(steps))
             })
         }
@@ -99,7 +149,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         if FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.removeItem(at: dir)
         }
-        for variant in kleinEncoderVariants {
+        for variant in [Qwen3Variant.qwen3_4B_8bit, .qwen3_4B_4bit] {
             if let path = TextEncoderModelDownloader.findQwen3ModelPath(for: variant) {
                 try? FileManager.default.removeItem(at: path)
             }
