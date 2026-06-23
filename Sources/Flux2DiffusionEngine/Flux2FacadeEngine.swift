@@ -34,6 +34,18 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                                   note: fits ? "Runs on Mac" : "Insufficient memory")
     }
 
+    /// Whether FLUX's required weights (transformer + VAE) are already on disk. Constructing a
+    /// `Flux2Pipeline` does not download anything, so this is a cheap on-disk check that mirrors
+    /// what `load` would otherwise fetch. The default quantization matches `init`'s.
+    public static func isDownloaded(quantization: Flux2QuantizationConfig = .memoryEfficient) -> Bool {
+        Flux2Pipeline(model: .klein4B, quantization: quantization).hasRequiredModels
+    }
+
+    /// Total bytes of FLUX weights currently on disk, for storage reporting.
+    public static func downloadedBytes() -> Int64 {
+        Flux2ModelDownloader.downloadedSize()
+    }
+
     /// `source` is intentionally ignored: `Flux2Pipeline` downloads and loads its own weights
     /// from HuggingFace. The catalog model/variant select the FLUX model + quantization.
     public func load(_ model: DiffusionModel, variant: ModelVariant, source: WeightSource,
