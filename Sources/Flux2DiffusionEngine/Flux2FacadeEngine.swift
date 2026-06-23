@@ -24,9 +24,14 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             return EngineCapabilities(runnable: false, residency: .unsupported,
                                       estimatedPeakBytes: variant.approximateBytes, note: "macOS only")
         }
-        // FLUX runs as a whole pipeline (its own memory management); report it resident.
-        return EngineCapabilities(runnable: true, residency: .resident,
-                                  estimatedPeakBytes: variant.approximateBytes, note: "Runs on Mac")
+        // FLUX runs as a whole resident pipeline. Estimate runtime peak above the on-disk size
+        // (weights + activation/working buffers) and gate against the device's memory budget so a
+        // low-RAM Mac isn't told a model is runnable that then OOMs at load.
+        let estimatedPeak = variant.approximateBytes + variant.approximateBytes / 3
+        let fits = estimatedPeak < device.memoryBudgetBytes
+        return EngineCapabilities(runnable: fits, residency: fits ? .resident : .unsupported,
+                                  estimatedPeakBytes: estimatedPeak,
+                                  note: fits ? "Runs on Mac" : "Insufficient memory")
     }
 
     /// `source` is intentionally ignored: `Flux2Pipeline` downloads and loads its own weights
