@@ -16,16 +16,22 @@ import class FluxTextEncoders.TextEncoderModelDownloader
 public actor Flux2FacadeEngine: DiffusionEngine {
     private var pipeline: Flux2Pipeline?
     private let quantization: Flux2QuantizationConfig
+    private let vaeVariant: ModelRegistry.VAEVariant
 
     /// `quantization` trades quality for memory/download size: `.highQuality` (bf16),
     /// `.balanced` (8-bit), or `.memoryEfficient` (4-bit text encoder + int8 transformer).
-    public init(quantization: Flux2QuantizationConfig = .memoryEfficient) {
+    /// `vaeVariant` picks the decoder: `.smallDecoder` (lighter, softer) or `.standard` (sharper).
+    public init(quantization: Flux2QuantizationConfig = .memoryEfficient,
+                vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) {
         self.quantization = quantization
+        self.vaeVariant = vaeVariant
     }
 
     /// Convenience init from the app-facing precision options.
-    public init(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision) {
+    public init(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision,
+                decoder: FluxDecoderPrecision = .small) {
         self.quantization = Self.quantization(transformer: transformer, encoder: encoder)
+        self.vaeVariant = decoder.vae
     }
 
     public static func capabilities(for model: DiffusionModel, variant: ModelVariant,
@@ -79,6 +85,22 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         var qwen3: Qwen3Variant { switch self { case .bit8: return .qwen3_4B_8bit; case .bit4: return .qwen3_4B_4bit } }
     }
 
+    /// App-facing VAE decoder options for Klein 4B. The small decoder is the default (lightest, and
+    /// the only one that fits an iPhone at 1024); the standard full VAE is sharper (mflux parity) but
+    /// FLUX.2 Non-Commercial licensed and its wider decoder channels cost more activation memory.
+    public enum FluxDecoderPrecision: String, CaseIterable, Sendable, Identifiable {
+        case small, standard
+        public var id: String { rawValue }
+        public var label: String { switch self { case .small: return "Small decoder"; case .standard: return "Standard VAE" } }
+        public var note: String {
+            switch self {
+            case .small: return "softer · smallest · default"
+            case .standard: return "sharpest · mflux parity · non-commercial"
+            }
+        }
+        var vae: ModelRegistry.VAEVariant { switch self { case .small: return .smallDecoder; case .standard: return .standard } }
+    }
+
     /// Build a flux quantization config from the app-facing precision options.
     public static func quantization(transformer: FluxTransformerPrecision = .bit8,
                                     encoder: FluxEncoderPrecision = .bit8) -> Flux2QuantizationConfig {
@@ -87,23 +109,28 @@ public actor Flux2FacadeEngine: DiffusionEngine {
 
     /// Precision-keyed convenience over `isDownloaded(quantization:)` so callers need not name the
     /// flux config type.
-    public static func isDownloaded(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision) -> Bool {
-        isDownloaded(quantization: quantization(transformer: transformer, encoder: encoder))
+    public static func isDownloaded(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision,
+                                    decoder: FluxDecoderPrecision = .small) -> Bool {
+        isDownloaded(quantization: quantization(transformer: transformer, encoder: encoder), vaeVariant: decoder.vae)
     }
 
     /// Precision-keyed convenience over `download(quantization:progress:)`.
     public static func download(transformer: FluxTransformerPrecision, encoder: FluxEncoderPrecision,
+                                decoder: FluxDecoderPrecision = .small,
                                 progress: @Sendable @escaping (Double) -> Void) async throws {
-        try await download(quantization: quantization(transformer: transformer, encoder: encoder), progress: progress)
+        try await download(quantization: quantization(transformer: transformer, encoder: encoder),
+                           vaeVariant: decoder.vae, progress: progress)
     }
 
     /// Build the Klein 4B pipeline. When 4-bit is selected (on either platform), force the
     /// pre-quantized `klein4B_4bit` checkpoint: it loads directly into a QuantizedLinear shell
     /// (2.18 GB, no float16 spike) instead of downloading the 7.2 GB bf16 and quantizing on load.
     /// 16-bit/8-bit are unaffected — they keep their existing variants on both platforms.
-    static func makePipeline(quantization: Flux2QuantizationConfig) -> Flux2Pipeline {
+    static func makePipeline(quantization: Flux2QuantizationConfig,
+                             vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) -> Flux2Pipeline {
         let override: ModelRegistry.TransformerVariant? = quantization.transformer == .int4 ? .klein4B_4bit : nil
-        return Flux2Pipeline(model: .klein4B, quantization: quantization, transformerVariantOverride: override)
+        return Flux2Pipeline(model: .klein4B, quantization: quantization,
+                             vaeVariant: vaeVariant, transformerVariantOverride: override)
     }
 
     /// The Qwen3 text-encoder variant a given config resolves to (mirrors `KleinTextEncoder`).
@@ -116,8 +143,9 @@ public actor Flux2FacadeEngine: DiffusionEngine {
 
     /// Whether FLUX is fully on disk for the given precision — transformer + VAE *and* the matching
     /// Qwen3 text encoder. Constructing a `Flux2Pipeline` downloads nothing, so this is cheap.
-    public static func isDownloaded(quantization: Flux2QuantizationConfig = .memoryEfficient) -> Bool {
-        let pipeline = makePipeline(quantization: quantization)
+    public static func isDownloaded(quantization: Flux2QuantizationConfig = .memoryEfficient,
+                                    vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) -> Bool {
+        let pipeline = makePipeline(quantization: quantization, vaeVariant: vaeVariant)
         return pipeline.hasRequiredModels
             && TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: qwen3Variant(for: quantization))
     }
@@ -136,8 +164,9 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     /// Pre-download everything FLUX needs for the given precision — transformer, VAE, and the
     /// matching Qwen3 text encoder — reporting 0...1 progress, without loading into memory.
     public static func download(quantization: Flux2QuantizationConfig = .memoryEfficient,
+                                vaeVariant: ModelRegistry.VAEVariant = .smallDecoder,
                                 progress: @Sendable @escaping (Double) -> Void) async throws {
-        let pipeline = makePipeline(quantization: quantization)
+        let pipeline = makePipeline(quantization: quantization, vaeVariant: vaeVariant)
         let missing = pipeline.missingModels
         let encoder = qwen3Variant(for: quantization)
         let needsEncoder = !TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: encoder)
@@ -203,10 +232,13 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             let down = TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: v)
             return (down, size(down, TextEncoderModelDownloader.findQwen3ModelPath(for: v), est))
         }
+        func vaeInfo(_ v: ModelRegistry.VAEVariant, _ est: Int64) -> (Bool, Int64) {
+            let down = Flux2ModelDownloader.isDownloaded(.vae(v))
+            return (down, size(down, Flux2ModelDownloader.findModelPath(for: .vae(v)), est))
+        }
         let txBF = tx(.klein4B_bf16, gib(7.2)), tx8 = tx(.klein4B_8bit, gib(3.3)), tx4 = tx(.klein4B_4bit, gib(2.18))
         let e8 = enc(.qwen3_4B_8bit, gib(4.0)), e4 = enc(.qwen3_4B_4bit, gib(1.9))
-        let vaeDown = Flux2ModelDownloader.isDownloaded(.vae(.smallDecoder))
-        let vaeBytes = size(vaeDown, Flux2ModelDownloader.findModelPath(for: .vae(.smallDecoder)), gib(0.57))
+        let vSmall = vaeInfo(.smallDecoder, gib(0.57)), vStd = vaeInfo(.standard, gib(0.16))
         return [
             .init(id: "tx-bf16", title: "Klein 4B · 16-bit", subtitle: "highest quality",
                   kind: .transformer, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: txBF.1, isDownloaded: txBF.0),
@@ -220,8 +252,10 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                   kind: .textEncoder, repo: "lmstudio-community/Qwen3-4B-MLX-8bit", bytes: e8.1, isDownloaded: e8.0),
             .init(id: "enc-4bit", title: "Qwen3 4B · 4-bit", subtitle: "smaller",
                   kind: .textEncoder, repo: "lmstudio-community/Qwen3-4B-MLX-4bit", bytes: e4.1, isDownloaded: e4.0),
-            .init(id: "vae", title: "Small VAE Decoder", subtitle: "recommended default",
-                  kind: .vae, repo: "black-forest-labs/FLUX.2-small-decoder", bytes: vaeBytes, isDownloaded: vaeDown),
+            .init(id: "vae-small", title: "Small VAE Decoder", subtitle: "softer · default",
+                  kind: .vae, repo: "black-forest-labs/FLUX.2-small-decoder", bytes: vSmall.1, isDownloaded: vSmall.0),
+            .init(id: "vae-standard", title: "Standard VAE", subtitle: "sharper · mflux parity · non-commercial",
+                  kind: .vae, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: vStd.1, isDownloaded: vStd.0),
         ]
     }
 
@@ -233,7 +267,8 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         case "tx-4bit": _ = try await Flux2ModelDownloader().download(.transformer(.klein4B_4bit), progress: { f, _ in progress(f) })
         case "enc-8bit": _ = try await TextEncoderModelDownloader().downloadQwen3(variant: .qwen3_4B_8bit, progress: { f, _ in progress(f) })
         case "enc-4bit": _ = try await TextEncoderModelDownloader().downloadQwen3(variant: .qwen3_4B_4bit, progress: { f, _ in progress(f) })
-        case "vae": _ = try await Flux2ModelDownloader().download(.vae(.smallDecoder), progress: { f, _ in progress(f) })
+        case "vae-small": _ = try await Flux2ModelDownloader().download(.vae(.smallDecoder), progress: { f, _ in progress(f) })
+        case "vae-standard": _ = try await Flux2ModelDownloader().download(.vae(.standard), progress: { f, _ in progress(f) })
         default: break
         }
         progress(1)
@@ -247,7 +282,8 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         case "tx-4bit": try Flux2ModelDownloader.delete(.transformer(.klein4B_4bit))
         case "enc-8bit": if let p = TextEncoderModelDownloader.findQwen3ModelPath(for: .qwen3_4B_8bit) { try FileManager.default.removeItem(at: p) }
         case "enc-4bit": if let p = TextEncoderModelDownloader.findQwen3ModelPath(for: .qwen3_4B_4bit) { try FileManager.default.removeItem(at: p) }
-        case "vae": try Flux2ModelDownloader.delete(.vae(.smallDecoder))
+        case "vae-small": try Flux2ModelDownloader.delete(.vae(.smallDecoder))
+        case "vae-standard": try Flux2ModelDownloader.delete(.vae(.standard))
         default: break
         }
     }
@@ -255,9 +291,10 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     /// The component ids a given precision actually uses (the "active recipe"). 16-bit and 4-bit
     /// transformer both run off the bf16 file (4-bit quantizes on load).
     public static func activeComponentIDs(transformer: FluxTransformerPrecision,
-                                          encoder: FluxEncoderPrecision) -> [String] {
+                                          encoder: FluxEncoderPrecision,
+                                          decoder: FluxDecoderPrecision) -> [String] {
         // Each precision maps to its own transformer file (4-bit = the pre-quantized checkpoint, on
-        // both platforms; 16-bit/8-bit unchanged).
+        // both platforms; 16-bit/8-bit unchanged) and each decoder to its own VAE component.
         let tx: String
         switch transformer {
         case .bit16: tx = "tx-bf16"
@@ -265,7 +302,8 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         case .bit4:  tx = "tx-4bit"
         }
         let enc = (encoder == .bit8) ? "enc-8bit" : "enc-4bit"
-        return [tx, enc, "vae"]
+        let vae = (decoder == .standard) ? "vae-standard" : "vae-small"
+        return [tx, enc, vae]
     }
 
     private static func directorySize(at url: URL) -> Int64 {
@@ -283,8 +321,8 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     public func load(_ model: DiffusionModel, variant: ModelVariant, source: WeightSource,
                      progress: @Sendable @escaping (Double) -> Void) async throws {
         // the catalog currently ships Klein 4B; makePipeline forces the pre-quantized 4-bit
-        // transformer on iPhone and keeps the Mac on-the-fly path unchanged.
-        let pipeline = Self.makePipeline(quantization: quantization)
+        // transformer when 4-bit is selected, and decodes with the chosen VAE (small/standard).
+        let pipeline = Self.makePipeline(quantization: quantization, vaeVariant: vaeVariant)
         try await pipeline.loadModels(progressCallback: { fraction, _ in progress(fraction) })
         self.pipeline = pipeline
     }
