@@ -1,5 +1,5 @@
 {
-  "originHash" : "db9aa1b3db72beead6e5e56458155a1eed9322d2170a1b989f57434edf960903",
+  "originHash" : "2e0aa6e71a1c9b9a528763555906edb30fcc86eb4f6231fad5a36d492d11f579",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -16,7 +16,7 @@
       "location" : "https://github.com/nanguoyu/flux-2-swift-mlx",
       "state" : {
         "branch" : "main",
-        "revision" : "d5edbab3fb755b68c93a5ebffaf52ca42f8ca985"
+        "revision" : "df917e053bfec17c8f93f1ef6631132a41c149a5"
       }
     },
     {
@@ -79,7 +79,7 @@
       "location" : "https://github.com/nanguoyu/swift-diffusion-core",
       "state" : {
         "branch" : "main",
-        "revision" : "be6879a119ba52b7f29aacb0d6ae8f2eb57120e0"
+        "revision" : "ff27f417952ad0bf38c8831bb9e26c6a97299a4e"
       }
     },
     {
@@ -103,10 +103,10 @@
     {
       "identity" : "swift-mlx-profiler",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/VincentGourbin/swift-mlx-profiler",
+      "location" : "https://github.com/nanguoyu/swift-mlx-profiler",
       "state" : {
-        "revision" : "b2a83b36a24b2e252573369644259a648fbaf18a",
-        "version" : "1.4.0"
+        "branch" : "vasa-macos14",
+        "revision" : "82eb03f594d8a4f691d1ad5ed50e52c72cbf0ff3"
       }
     },
     {

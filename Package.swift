@@ -1,13 +1,14 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-// flux2-diffusion-engine — a macOS-only facade that wraps the monolithic flux-2-swift-mlx
-// `Flux2Pipeline` behind swift-diffusion-core's `DiffusionEngine`. FLUX.2 cannot be block-
-// streamed (no per-block API) and the package is macOS-only (14+), so it lives outside the core
-// (which targets iOS too) and is linked only by the macOS app target.
+// flux2-diffusion-engine — a facade that wraps the monolithic flux-2-swift-mlx `Flux2Pipeline`
+// behind swift-diffusion-core's `DiffusionEngine`. FLUX.2 owns its own denoise loop and weight
+// loading (no per-block streaming API), so it runs as a resident (Mac) or two-phase (iPhone)
+// pipeline rather than via the core's block streamer. Builds for macOS and iOS: on iPhone it loads
+// the pre-quantized 4-bit Klein checkpoint, which fits the phone's memory budget with no load spike.
 let package = Package(
     name: "flux2-diffusion-engine",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "Flux2DiffusionEngine", targets: ["Flux2DiffusionEngine"]),
     ],
