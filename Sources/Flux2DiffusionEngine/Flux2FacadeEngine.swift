@@ -150,15 +150,13 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             && TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: qwen3Variant(for: quantization))
     }
 
-    /// Total bytes of FLUX weights on disk: model components + any downloaded Qwen3 text encoders.
+    /// Total bytes of FLUX weights on disk. Sums every individually-managed component that is actually
+    /// present (all transformer precisions + both VAE decoders + the Qwen3 encoders) using their real
+    /// on-disk sizes, so the Settings storage figure is accurate. The previous implementation summed
+    /// `Flux2ModelDownloader.downloadedSize()`, a hardcoded component list that under-counted the
+    /// Klein transformer variants and the small decoder.
     public static func downloadedBytes() -> Int64 {
-        var total = Flux2ModelDownloader.downloadedSize()
-        for variant in [Qwen3Variant.qwen3_4B_8bit, .qwen3_4B_4bit] {
-            if let path = TextEncoderModelDownloader.findQwen3ModelPath(for: variant) {
-                total += directorySize(at: path)
-            }
-        }
-        return total
+        allComponents().filter { $0.isDownloaded }.reduce(0) { $0 + $1.bytes }
     }
 
     /// Pre-download everything FLUX needs for the given precision — transformer, VAE, and the
