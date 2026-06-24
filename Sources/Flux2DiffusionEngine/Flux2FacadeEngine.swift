@@ -63,7 +63,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             switch self {
             case .bit16: return "highest quality · ~8 GB"
             case .bit8: return "balanced · ~4 GB"
-            case .bit4: return "lowest memory · ~8 GB, quantizes on load"
+            case .bit4: return "lowest memory · ~2 GB, pre-quantized"
             }
         }
         var quant: TransformerQuantization { switch self { case .bit16: return .bf16; case .bit8: return .qint8; case .bit4: return .int4 } }
@@ -97,15 +97,12 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         try await download(quantization: quantization(transformer: transformer, encoder: encoder), progress: progress)
     }
 
-    /// Build the Klein 4B pipeline, forcing the pre-quantized 4-bit transformer on iPhone (the only
-    /// Klein that fits the phone's memory budget; loads with no float16 spike). Mac uses the default
-    /// on-the-fly path for every precision, so its behaviour is byte-for-byte unchanged.
+    /// Build the Klein 4B pipeline. When 4-bit is selected (on either platform), force the
+    /// pre-quantized `klein4B_4bit` checkpoint: it loads directly into a QuantizedLinear shell
+    /// (2.18 GB, no float16 spike) instead of downloading the 7.2 GB bf16 and quantizing on load.
+    /// 16-bit/8-bit are unaffected — they keep their existing variants on both platforms.
     static func makePipeline(quantization: Flux2QuantizationConfig) -> Flux2Pipeline {
-        #if os(iOS)
         let override: ModelRegistry.TransformerVariant? = quantization.transformer == .int4 ? .klein4B_4bit : nil
-        #else
-        let override: ModelRegistry.TransformerVariant? = nil
-        #endif
         return Flux2Pipeline(model: .klein4B, quantization: quantization, transformerVariantOverride: override)
     }
 
@@ -206,15 +203,19 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             let down = TextEncoderModelDownloader.isQwen3ModelDownloaded(variant: v)
             return (down, size(down, TextEncoderModelDownloader.findQwen3ModelPath(for: v), est))
         }
-        let txBF = tx(.klein4B_bf16, gib(7.2)), tx8 = tx(.klein4B_8bit, gib(3.3))
+        let txBF = tx(.klein4B_bf16, gib(7.2)), tx8 = tx(.klein4B_8bit, gib(3.3)), tx4 = tx(.klein4B_4bit, gib(2.18))
         let e8 = enc(.qwen3_4B_8bit, gib(4.0)), e4 = enc(.qwen3_4B_4bit, gib(1.9))
         let vaeDown = Flux2ModelDownloader.isDownloaded(.vae(.smallDecoder))
         let vaeBytes = size(vaeDown, Flux2ModelDownloader.findModelPath(for: .vae(.smallDecoder)), gib(0.57))
-        var comps: [Flux2ComponentInfo] = [
-            .init(id: "tx-bf16", title: "Klein 4B · 16-bit", subtitle: "also serves 4-bit (quantizes on load)",
+        return [
+            .init(id: "tx-bf16", title: "Klein 4B · 16-bit", subtitle: "highest quality",
                   kind: .transformer, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: txBF.1, isDownloaded: txBF.0),
             .init(id: "tx-8bit", title: "Klein 4B · 8-bit", subtitle: "",
                   kind: .transformer, repo: "black-forest-labs/FLUX.2-klein-4B", bytes: tx8.1, isDownloaded: tx8.0),
+            // Pre-quantized 4-bit: loads directly into a QuantizedLinear shell (no float16 spike), so
+            // it's both the smallest download and the only Klein that fits an iPhone.
+            .init(id: "tx-4bit", title: "Klein 4B · 4-bit", subtitle: "pre-quantized · loads directly",
+                  kind: .transformer, repo: "mlx-community/flux2-klein-4b-4bit", bytes: tx4.1, isDownloaded: tx4.0),
             .init(id: "enc-8bit", title: "Qwen3 4B · 8-bit", subtitle: "better prompt fidelity",
                   kind: .textEncoder, repo: "lmstudio-community/Qwen3-4B-MLX-8bit", bytes: e8.1, isDownloaded: e8.0),
             .init(id: "enc-4bit", title: "Qwen3 4B · 4-bit", subtitle: "smaller",
@@ -222,15 +223,6 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             .init(id: "vae", title: "Small VAE Decoder", subtitle: "recommended default",
                   kind: .vae, repo: "black-forest-labs/FLUX.2-small-decoder", bytes: vaeBytes, isDownloaded: vaeDown),
         ]
-        #if os(iOS)
-        // iPhone uses the pre-quantized 4-bit transformer — it loads directly into a QuantizedLinear
-        // shell with no float16 spike (the bf16/8-bit files would not fit the phone's memory budget).
-        let tx4 = tx(.klein4B_4bit, gib(2.18))
-        comps.insert(.init(id: "tx-4bit", title: "Klein 4B · 4-bit", subtitle: "pre-quantized · iPhone",
-                           kind: .transformer, repo: "mlx-community/flux2-klein-4b-4bit",
-                           bytes: tx4.1, isDownloaded: tx4.0), at: 2)
-        #endif
-        return comps
     }
 
     /// Download a single component by its `Flux2ComponentInfo.id`, reporting 0...1 progress.
@@ -264,12 +256,14 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     /// transformer both run off the bf16 file (4-bit quantizes on load).
     public static func activeComponentIDs(transformer: FluxTransformerPrecision,
                                           encoder: FluxEncoderPrecision) -> [String] {
-        #if os(iOS)
-        // iPhone 4-bit runs off the pre-quantized file; Mac 4-bit quantizes the bf16 file on load.
-        let tx = (transformer == .bit8) ? "tx-8bit" : "tx-4bit"
-        #else
-        let tx = (transformer == .bit8) ? "tx-8bit" : "tx-bf16"
-        #endif
+        // Each precision maps to its own transformer file (4-bit = the pre-quantized checkpoint, on
+        // both platforms; 16-bit/8-bit unchanged).
+        let tx: String
+        switch transformer {
+        case .bit16: tx = "tx-bf16"
+        case .bit8:  tx = "tx-8bit"
+        case .bit4:  tx = "tx-4bit"
+        }
         let enc = (encoder == .bit8) ? "enc-8bit" : "enc-4bit"
         return [tx, enc, "vae"]
     }
