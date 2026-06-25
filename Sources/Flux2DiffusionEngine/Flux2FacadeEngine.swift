@@ -129,8 +129,15 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     static func makePipeline(quantization: Flux2QuantizationConfig,
                              vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) -> Flux2Pipeline {
         let override: ModelRegistry.TransformerVariant? = quantization.transformer == .int4 ? .klein4B_4bit : nil
-        return Flux2Pipeline(model: .klein4B, quantization: quantization,
-                             vaeVariant: vaeVariant, transformerVariantOverride: override)
+        let pipeline = Flux2Pipeline(model: .klein4B, quantization: quantization,
+                                     vaeVariant: vaeVariant, transformerVariantOverride: override)
+        #if os(iOS)
+        // Klein's distilled 4-step run never reaches the default clearCacheEveryNSteps=5 cadence (4<5),
+        // so reclaimable GPU cache is never trimmed between steps. Trim every step on iPhone — free and
+        // numerically inert, shaving the denoise-phase peak.
+        pipeline.clearCacheEveryNSteps = 1
+        #endif
+        return pipeline
     }
 
     /// The Qwen3 text-encoder variant a given config resolves to (mirrors `KleinTextEncoder`).
