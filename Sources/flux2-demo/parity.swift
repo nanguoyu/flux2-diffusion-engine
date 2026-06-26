@@ -51,7 +51,11 @@ func runParity() async throws {
     let seed: UInt64 = 42
     let model = ModelCatalog.fluxKlein4B
     guard let variant = model.variants.first(where: { $0.precision == .q4 }) else { return }
-    let size = ImageSize.square512
+    // --size 1024 also validates the 1024 code path (4096-token sigmas, position ids, larger attention)
+    // against the resident facade, which Mac can run resident. Default 512.
+    let args = Array(CommandLine.arguments.dropFirst())
+    let px = args.firstIndex(of: "--size").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 512
+    let size = ImageSize(width: px, height: px)
     let steps = 4
 
     // Force the per-step block-STREAMING residency even on a Mac with plenty of RAM, by handing the
@@ -63,7 +67,7 @@ func runParity() async throws {
         ? DeviceTier(physicalMemoryBytes: 4_175_000_000, isPhone: false)
         : .current
 
-    print("=== 512 parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")) — prompt: \(prompt) ===")
+    print("=== \(px) parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")) — prompt: \(prompt) ===")
 
     // 1) Resident facade (the oracle).
     print("[resident] loading facade…")
@@ -90,6 +94,6 @@ func runParity() async throws {
     // 3) Compare.
     let (maxDiff, psnr) = compareImages(resident, streamedImage)
     let verdict = psnr.isInfinite || psnr > 35 ? "PASS ✅" : "CHECK ⚠️ (encode/decode/VAE-variant divergence?)"
-    print(String(format: "512 PARITY: maxPixelDiff=%d  PSNR=%.1f dB  →  %@", maxDiff, psnr, verdict))
+    print(String(format: "\(px) PARITY: maxPixelDiff=%d  PSNR=%.1f dB  →  %@", maxDiff, psnr, verdict))
     print("Wrote parity-resident.png and parity-streamed.png for visual inspection.")
 }
