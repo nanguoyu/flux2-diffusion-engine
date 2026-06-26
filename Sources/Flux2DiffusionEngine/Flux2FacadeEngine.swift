@@ -336,7 +336,15 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                          progress: @Sendable @escaping (GenerationProgress) -> Void) async throws -> CGImage {
         guard let pipeline else { throw EngineError.notLoaded }
         pipeline.controlCheckpoint = { try request.control?.checkpoint() }
-        defer { pipeline.controlCheckpoint = nil }
+        // Thermal pacing: a no-op on macOS and when cool; on a hot phone it slows the loop or pauses
+        // to cool (surfacing a non-error `.cooling` progress) rather than risking a thermal shutdown.
+        pipeline.thermalThrottle = {
+            try await ThermalGovernor.shared.throttleIfNeeded { progress(.cooling) }
+        }
+        defer {
+            pipeline.controlCheckpoint = nil
+            pipeline.thermalThrottle = nil
+        }
         progress(.preparing)
         let image: CGImage
         if let reference = request.referenceImage {
