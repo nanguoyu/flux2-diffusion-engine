@@ -90,19 +90,24 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
         let shell = Flux2Transformer2DModel(config: Flux2Weights.shellConfig())
         try Flux2Weights.loadShared(from: txSource, into: shell)
 
+        // Reuse-shell: build + quantize ONE double-block and ONE single-block shell, shared across all
+        // blocks of that type (and all steps). Each block swaps only its packed params in, so the ~100
+        // per-image quantize() passes collapse to two.
+        let doubleShell = Flux2Weights.makeDoubleShell(dim: dim, heads: heads, headDim: headDim)
+        let singleShell = Flux2Weights.makeSingleShell(dim: dim, heads: heads, headDim: headDim)
+
         let holder = Flux2StreamHolder()
         var blocks: [any StreamableBlock] = []
         for i in 0 ..< 5 {
-            blocks.append(Flux2StreamableBlock(index: i, isDouble: true, blockIndexInType: i,
-                                               dim: dim, heads: heads, headDim: headDim,
+            blocks.append(Flux2StreamableBlock(doubleIndex: i, blockIndexInType: i, shell: doubleShell,
                                                approximateBytes: 120_000_000, holder: holder))
         }
         for j in 0 ..< 20 {
-            blocks.append(Flux2StreamableBlock(index: 5 + j, isDouble: false, blockIndexInType: j,
-                                               dim: dim, heads: heads, headDim: headDim,
+            blocks.append(Flux2StreamableBlock(singleIndex: 5 + j, blockIndexInType: j, shell: singleShell,
                                                approximateBytes: 70_000_000, holder: holder))
         }
-        return Flux2Denoiser(shell: shell, holder: holder, blocks: blocks, imgIds: imgIds, txtIds: txtIds)
+        return Flux2Denoiser(shell: shell, holder: holder, blocks: blocks, imgIds: imgIds, txtIds: txtIds,
+                             doubleShell: doubleShell, singleShell: singleShell)
     }
 
     // MARK: - Decode (VAE), transformer already freed by the engine's two-phase staging

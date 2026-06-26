@@ -10,102 +10,119 @@ public final class Flux2StreamHolder: @unchecked Sendable {
     public init() {}
 }
 
-/// A single FLUX.2 transformer block behind the core engine's `StreamableBlock` seam. Two modes:
+/// A single FLUX.2 transformer block behind the core engine's `StreamableBlock` seam.
 ///
-/// - STREAMING (the iPhone 1024 path): constructed with just an index + dims; `load(from:)` builds a
-///   fresh `Flux2TransformerBlock`/`Flux2SingleTransformerBlock` and fills it via `Flux2Weights`,
-///   `release()` drops it. The engine loops load → run → eval → release → clearCache so only one
-///   block is resident at a time.
-/// - RESIDENT (Mac / the parity test): constructed with a pre-built block; `load`/`release` are
-///   no-ops and it forwards to that block every step.
+/// REUSE-SHELL (the production path): one quantized `Flux2TransformerBlock` shell (and one single-block
+/// shell) is built + quantized ONCE and shared across all blocks of that type. Each block only swaps
+/// the packed params in via `Flux2Weights.updateXBlock` — collapsing the ~100 per-image `quantize()`
+/// GPU passes (≈ the pread I/O in magnitude) to one. The packed-param update happens in
+/// `callAsFunction`, not `load`, so the engine's resident path (which loads every block before running
+/// any) doesn't clobber the shell: MLX captures the param ARRAYS at the forward call and `update`
+/// REPLACES references, so each block's graph keeps its own weights until it's evaluated.
 ///
-/// `callAsFunction` runs the block through the SAME static `runDouble`/`runSingle` the decomposition
-/// test validates, reading the per-step context from the shared holder — so the streamed result is
-/// identical to the monolithic forward.
+/// RESIDENT (the wiring test): a pre-built block; `load`/`release` are no-ops and it forwards to it.
+///
+/// `callAsFunction` runs through the same static `runDouble`/`runSingle` the decomposition test
+/// validates, reading the per-step context from the shared holder.
 public final class Flux2StreamableBlock: StreamableBlock {
     public let index: Int
     public let approximateBytes: Int64
     private let isDouble: Bool
     private let blockIndexInType: Int
-    private let dim: Int, heads: Int, headDim: Int
     private let holder: Flux2StreamHolder
 
-    private var doubleBlock: Flux2TransformerBlock?
-    private var singleBlock: Flux2SingleTransformerBlock?
+    // reuse-shell mode: the shared shell for this block's type (one is non-nil) + the stashed source.
+    private let doubleShell: Flux2TransformerBlock?
+    private let singleShell: Flux2SingleTransformerBlock?
+    private var source: WeightSource?
 
-    /// Streaming-mode init: weights are loaded per step from the source.
-    public init(index: Int, isDouble: Bool, blockIndexInType: Int,
-                dim: Int, heads: Int, headDim: Int, approximateBytes: Int64, holder: Flux2StreamHolder) {
-        self.index = index
-        self.isDouble = isDouble
-        self.blockIndexInType = blockIndexInType
-        self.dim = dim; self.heads = heads; self.headDim = headDim
-        self.approximateBytes = approximateBytes
-        self.holder = holder
+    // resident mode: a pre-built block (wiring test).
+    private let residentDouble: Flux2TransformerBlock?
+    private let residentSingle: Flux2SingleTransformerBlock?
+
+    /// Reuse-shell init for a DOUBLE block.
+    public init(doubleIndex: Int, blockIndexInType: Int, shell: Flux2TransformerBlock,
+                approximateBytes: Int64, holder: Flux2StreamHolder) {
+        self.index = doubleIndex; self.isDouble = true; self.blockIndexInType = blockIndexInType
+        self.doubleShell = shell; self.singleShell = nil
+        self.residentDouble = nil; self.residentSingle = nil
+        self.approximateBytes = approximateBytes; self.holder = holder
     }
 
-    /// Resident-mode init: a pre-built block; load/release are no-ops.
+    /// Reuse-shell init for a SINGLE block.
+    public init(singleIndex: Int, blockIndexInType: Int, shell: Flux2SingleTransformerBlock,
+                approximateBytes: Int64, holder: Flux2StreamHolder) {
+        self.index = singleIndex; self.isDouble = false; self.blockIndexInType = blockIndexInType
+        self.doubleShell = nil; self.singleShell = shell
+        self.residentDouble = nil; self.residentSingle = nil
+        self.approximateBytes = approximateBytes; self.holder = holder
+    }
+
+    /// Resident init (a pre-built block; load/release no-op).
     public init(index: Int, resident block: Flux2TransformerBlock, holder: Flux2StreamHolder) {
         self.index = index; self.isDouble = true; self.blockIndexInType = index
-        self.dim = 0; self.heads = 0; self.headDim = 0
+        self.doubleShell = nil; self.singleShell = nil
+        self.residentDouble = block; self.residentSingle = nil
         self.approximateBytes = 0; self.holder = holder
-        self.doubleBlock = block
     }
     public init(index: Int, resident block: Flux2SingleTransformerBlock, holder: Flux2StreamHolder) {
         self.index = index; self.isDouble = false; self.blockIndexInType = index
-        self.dim = 0; self.heads = 0; self.headDim = 0
+        self.doubleShell = nil; self.singleShell = nil
+        self.residentDouble = nil; self.residentSingle = block
         self.approximateBytes = 0; self.holder = holder
-        self.singleBlock = block
     }
 
     public func load(from source: WeightSource) throws {
-        if isDouble {
-            guard doubleBlock == nil else { return }   // resident mode: already built
-            let block = Flux2TransformerBlock(dim: dim, numHeads: heads, headDim: headDim)
-            try Flux2Weights.loadDoubleBlock(blockIndexInType, from: source, into: block)
-            doubleBlock = block
-        } else {
-            guard singleBlock == nil else { return }
-            let block = Flux2SingleTransformerBlock(dim: dim, numHeads: heads, headDim: headDim)
-            try Flux2Weights.loadSingleBlock(blockIndexInType, from: source, into: block)
-            singleBlock = block
-        }
+        // Stash the source; the per-block param swap happens in callAsFunction so loading all blocks
+        // upfront (resident path) doesn't leave the shared shell holding only the last block's weights.
+        self.source = source
     }
 
     public func callAsFunction(_ x: MLXArray, conditioning: Conditioning, timestep: MLXArray) -> MLXArray {
         guard let ctx = holder.context else { return x }   // embed must run first each step
         if isDouble {
-            return Flux2Transformer2DModel.runDouble(doubleBlock!, hidden: x, context: ctx)
+            if let r = residentDouble { return Flux2Transformer2DModel.runDouble(r, hidden: x, context: ctx) }
+            let shell = doubleShell!
+            if let source { try? Flux2Weights.updateDoubleBlock(blockIndexInType, from: source, into: shell) }
+            return Flux2Transformer2DModel.runDouble(shell, hidden: x, context: ctx)
         } else {
-            return Flux2Transformer2DModel.runSingle(singleBlock!, hidden: x, context: ctx)
+            if let r = residentSingle { return Flux2Transformer2DModel.runSingle(r, hidden: x, context: ctx) }
+            let shell = singleShell!
+            if let source { try? Flux2Weights.updateSingleBlock(blockIndexInType, from: source, into: shell) }
+            return Flux2Transformer2DModel.runSingle(shell, hidden: x, context: ctx)
         }
     }
 
     public func release() {
-        // Resident blocks are kept (dims are 0 in resident mode, so a reload would be impossible);
-        // streaming blocks drop their weights so the engine's clearCache reclaims the memory.
-        if dim != 0 { doubleBlock = nil; singleBlock = nil }
+        // The shells persist (reuse); just drop the stashed source. The current block's weight arrays
+        // are freed by the engine's eval+clearCache once its hidden state is materialized.
+        source = nil
     }
 }
 
 /// FLUX.2 denoiser for the core engine's block-streaming loop. Holds a lightweight 0-block SHELL
-/// transformer (the shared submodules, resident) that runs `streamEmbed`/`streamUnembed`, plus the 25
-/// streamable blocks. `embed` packs `[txt;img]` and stashes the per-step context in the holder; the
-/// blocks read it; `unembed` slices the image tokens back out and projects to the velocity.
+/// transformer (the shared submodules, resident) that runs `streamEmbed`/`streamUnembed`, the two
+/// reused block shells, and the 25 streamable blocks. `embed` packs `[txt;img]` and stashes the
+/// per-step context in the holder; the blocks read it; `unembed` slices the image tokens back out.
 public final class Flux2Denoiser: Denoiser {
     public let blocks: [any StreamableBlock]
     private let shell: Flux2Transformer2DModel
+    private let doubleShell: Flux2TransformerBlock?
+    private let singleShell: Flux2SingleTransformerBlock?
     private let holder: Flux2StreamHolder
     private let imgIds: MLXArray
     private let txtIds: MLXArray
 
     public init(shell: Flux2Transformer2DModel, holder: Flux2StreamHolder,
-                blocks: [any StreamableBlock], imgIds: MLXArray, txtIds: MLXArray) {
+                blocks: [any StreamableBlock], imgIds: MLXArray, txtIds: MLXArray,
+                doubleShell: Flux2TransformerBlock? = nil, singleShell: Flux2SingleTransformerBlock? = nil) {
         self.shell = shell
         self.holder = holder
         self.blocks = blocks
         self.imgIds = imgIds
         self.txtIds = txtIds
+        self.doubleShell = doubleShell
+        self.singleShell = singleShell
     }
 
     public func embed(latent: MLXArray, timestep: MLXArray, conditioning: Conditioning) -> MLXArray {

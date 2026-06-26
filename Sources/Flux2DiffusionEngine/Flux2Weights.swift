@@ -72,6 +72,38 @@ public enum Flux2Weights {
                       diskKeys: singleBlockDiskKeys(), from: source, into: block, groupSize: groupSize, bits: bits)
     }
 
+    // MARK: - Reuse-shell: build the quantized structure ONCE, update only the packed params per block
+
+    /// A quantized double-stream block SHELL — the data-independent QuantizedLinear structure built
+    /// once and reused across all 5 double blocks (and all steps) via `updateDoubleBlock`, so the
+    /// ~100 per-image `quantize()` GPU passes (≈ the pread I/O in magnitude) collapse to one.
+    public static func makeDoubleShell(dim: Int, heads: Int, headDim: Int,
+                                       groupSize: Int = 64, bits: Int = 4) -> Flux2TransformerBlock {
+        let b = Flux2TransformerBlock(dim: dim, numHeads: heads, headDim: headDim)
+        quantize(model: b, groupSize: groupSize, bits: bits)
+        return b
+    }
+
+    public static func makeSingleShell(dim: Int, heads: Int, headDim: Int,
+                                       groupSize: Int = 64, bits: Int = 4) -> Flux2SingleTransformerBlock {
+        let b = Flux2SingleTransformerBlock(dim: dim, numHeads: heads, headDim: headDim)
+        quantize(model: b, groupSize: groupSize, bits: bits)
+        return b
+    }
+
+    /// Update an ALREADY-quantized shell with block `index`'s packed params (no re-quantize). Updating
+    /// packed weight/scales/biases into a reused QuantizedLinear is bit-exact vs a fresh quantize+update
+    /// (quantize builds data-independent structure; the values arrive via update) — guarded by parity.
+    public static func updateDoubleBlock(_ index: Int, from source: WeightSource, into shell: Flux2TransformerBlock) throws {
+        try updateBlock(diskPrefix: "transformer_blocks.\(index).", modulePrefix: "transformerBlocks.\(index).",
+                        diskKeys: doubleBlockDiskKeys(), from: source, into: shell)
+    }
+
+    public static func updateSingleBlock(_ index: Int, from source: WeightSource, into shell: Flux2SingleTransformerBlock) throws {
+        try updateBlock(diskPrefix: "single_transformer_blocks.\(index).", modulePrefix: "singleTransformerBlocks.\(index).",
+                        diskKeys: singleBlockDiskKeys(), from: source, into: shell)
+    }
+
     /// The 9 non-block quantized Linears (×3 = 27 tensors) shared by every step: the embedders, the
     /// timestep/guidance embedder, the three modulation layers, the final norm and projection.
     public static func sharedDiskKeys() -> [String] {
@@ -115,10 +147,16 @@ public enum Flux2Weights {
 
     static func loadBlock(diskPrefix: String, modulePrefix: String, diskKeys: [String],
                           from source: WeightSource, into block: Module, groupSize: Int, bits: Int) throws {
-        let map = try blockKeyMap(diskPrefix: diskPrefix, modulePrefix: modulePrefix, diskKeys: diskKeys)
         // Quantize every Linear (all block projections are 4-bit on disk), exactly as the validated
         // whole-model load does, so the .scales/.biases destinations exist before update.
         quantize(model: block, groupSize: groupSize, bits: bits)
+        try updateBlock(diskPrefix: diskPrefix, modulePrefix: modulePrefix, diskKeys: diskKeys,
+                        from: source, into: block)
+    }
+
+    static func updateBlock(diskPrefix: String, modulePrefix: String, diskKeys: [String],
+                            from source: WeightSource, into block: Module) throws {
+        let map = try blockKeyMap(diskPrefix: diskPrefix, modulePrefix: modulePrefix, diskKeys: diskKeys)
         var collected: [String: MLXArray] = [:]
         for (dk, modulePath) in map {
             guard let t = try? source.tensor(TensorKey(diskPrefix + dk)) else {
