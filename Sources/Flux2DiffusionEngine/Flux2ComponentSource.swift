@@ -1,6 +1,7 @@
 @preconcurrency import MLX
 import Foundation
 import DiffusionCore
+import Flux2Core
 
 /// Resolves FLUX.2's 3-namespace collision at the `WeightSource` seam — the FLUX analogue of
 /// `ZImageComponentSource`, with the identical `text_encoder/` `transformer/` `vae/` layout.
@@ -110,5 +111,24 @@ public extension Flux2ComponentSource {
         var tokIsDir: ObjCBool = false
         let tokExists = FileManager.default.fileExists(atPath: tok.path, isDirectory: &tokIsDir) && tokIsDir.boolValue
         return Flux2ComponentSource(sources: sources, tokenizerDirectory: tokExists ? tok : nil)
+    }
+
+    /// Build a TRANSFORMER-ONLY streaming source for the pre-quantized Klein 4B 4-bit checkpoint from
+    /// its downloaded cache directory — the entry point the app uses for the 1024-on-iPhone streaming
+    /// engine. FLUX downloads its three components to separate caches (unlike Z-Image's single model
+    /// dir), and `Flux2Architecture` loads the encoder + VAE from their own caches, so only the
+    /// transformer sub-source is needed: the streaming blocks + `loadShared` read through it, and the
+    /// engine's `freesOnRelease` gate is satisfied by the `RangedFileWeightSource`.
+    static func openKlein4BStreaming() throws -> Flux2ComponentSource {
+        guard let dir = Flux2ModelDownloader.findModelPath(for: .transformer(.klein4B_4bit)) else {
+            throw SourceError.missingComponentFolder("transformer (klein4B_4bit)")
+        }
+        let files = try FileManager.default
+            .contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "safetensors" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else { throw SourceError.noSafetensors("transformer") }
+        let txSource = try RangedFileWeightSource(files: files, isStreaming: true)
+        return Flux2ComponentSource(sources: [.transformer: txSource])
     }
 }
