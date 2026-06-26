@@ -54,7 +54,11 @@ func run() async throws {
 }
 
 do {
-    try await run()
+    if CommandLine.arguments.dropFirst().contains("--parity") {
+        try await runParity()
+    } else {
+        try await run()
+    }
 } catch {
     FileHandle.standardError.write(Data("Error: \(error)\n".utf8))
     exit(1)
