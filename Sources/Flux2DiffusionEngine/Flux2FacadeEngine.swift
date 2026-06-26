@@ -98,7 +98,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
             case .standard: return "sharpest · mflux parity · non-commercial"
             }
         }
-        var vae: ModelRegistry.VAEVariant { switch self { case .small: return .smallDecoder; case .standard: return .standard } }
+        public var vae: ModelRegistry.VAEVariant { switch self { case .small: return .smallDecoder; case .standard: return .standard } }
     }
 
     /// Build a flux quantization config from the app-facing precision options.
