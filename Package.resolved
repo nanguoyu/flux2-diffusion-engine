@@ -16,7 +16,7 @@
       "location" : "https://github.com/nanguoyu/flux-2-swift-mlx",
       "state" : {
         "branch" : "main",
-        "revision" : "335112bdf73e9e2acaa8e682bf97eb0982c49282"
+        "revision" : "0886245455fed4652a47a9ba2cc8eba744520eb2"
       }
     },
     {
@@ -79,7 +79,7 @@
       "location" : "https://github.com/nanguoyu/swift-diffusion-core",
       "state" : {
         "branch" : "main",
-        "revision" : "27c8a818f63ea0a39a0b71001aed24e40ff7cda0"
+        "revision" : "f668e8563fd952bbcdca15f6d2a8b389c448c0c5"
       }
     },
     {

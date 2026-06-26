@@ -81,8 +81,9 @@ func runParity() async throws {
 
     // 2) Streaming engine (the path under test).
     print("[streamed] loading MLXDiffusionEngine + Flux2Architecture…")
+    let evalK = args.firstIndex(of: "--evalk").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 1
     let streamed = MLXDiffusionEngine(architecture: Flux2Architecture(),   // defaults to .smallDecoder
-                                      device: device)
+                                      device: device, streamEvalEveryK: evalK)
     let source = try Flux2ComponentSource.openKlein4BStreaming()
     try await streamed.load(model, variant: variant, source: source) { _ in }
     print("[streamed] generating…")
