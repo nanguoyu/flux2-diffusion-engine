@@ -106,6 +106,53 @@ func runDiag() async throws {
     try await runGlue(full: full)
 }
 
+/// Validate the iPhone's >=1024 VAE tiling: decode a REAL 1024 latent both untiled and tiled
+/// (.aggressive, the iPhone path) and compare. High PSNR = the tiling that kills the decode memory
+/// spike doesn't introduce visible seams. The Mac parity runs untiled, so this is the one
+/// iPhone-specific path it doesn't otherwise cover.
+func runTile() async throws {
+    guard let dir = Flux2ModelDownloader.findModelPath(for: .transformer(.klein4B_4bit)) else {
+        print("transformer not downloaded — run `swift run flux2-demo` once first"); return
+    }
+    let full = Flux2Transformer2DModel(config: .klein4B)
+    quantize(model: full, groupSize: 64, bits: 4)
+    var weights = try Flux2WeightLoader.loadWeights(from: dir.path)
+    try Flux2WeightLoader.applyPreQuantizedTransformerWeights(&weights, to: full)
+
+    let prompt = "a red panda on a mossy rock, soft morning light, shallow depth of field"
+    let enc = KleinTextEncoder(variant: .klein4B, quantization: .mlx4bit)
+    try await enc.load()
+    let textEmb = try enc.encode(prompt, upsample: false)
+    let (vh, vw) = LatentUtils.validateDimensions(height: 1024, width: 1024)
+    let patch = LatentUtils.generatePatchifiedLatents(height: vh, width: vw, seed: 42)
+    var packed = LatentUtils.packPatchifiedToSequence(patch)
+    let (textIds, imageIds, _) = LatentUtils.combinePositionIDs(textLength: textEmb.shape[1], height: vh, width: vw)
+    let sigmas = Flux2Sigmas.schedule(width: 1024, height: 1024, steps: 4)
+    print("TILE: denoising 1024 (\(packed.shape))…")
+    for i in 0 ..< 4 {
+        let vel = full(hiddenStates: packed, encoderHiddenStates: textEmb, timestep: MLXArray([sigmas[i]]),
+                       guidance: nil, imgIds: imageIds, txtIds: textIds)
+        packed = packed + (sigmas[i + 1] - sigmas[i]) * vel
+    }
+    let vae = try Flux2StreamingSupport.loadVAE(variant: .smallDecoder)
+    let finalPatch = LatentUtils.unpackSequenceToPatchified(packed, height: vh, width: vw)
+    let denorm = LatentUtils.denormalizeLatentsWithBatchNorm(
+        finalPatch, runningMean: vae.batchNormRunningMean, runningVar: vae.batchNormRunningVar)
+    let vaeLatent = LatentUtils.unpatchifyLatents(denorm)
+    print("TILE: VAE latent \(vaeLatent.shape) — decoding untiled vs .aggressive tiled…")
+
+    let untiled = vae.decode(vaeLatent)
+    let tiled = vae.decodeWithTiling(vaeLatent, tiling: .aggressive)
+    guard let imgU = Flux2StreamingSupport.imageFromVAEOutput(untiled),
+          let imgT = Flux2StreamingSupport.imageFromVAEOutput(tiled) else { print("TILE decode failed"); return }
+    try writePNG(imgU, to: URL(fileURLWithPath: "tile-untiled.png"))
+    try writePNG(imgT, to: URL(fileURLWithPath: "tile-tiled.png"))
+    let (maxDiff, psnr) = compareImages(imgU, imgT)
+    let verdict = psnr > 40 ? "CLEAN ✅ (no visible seams)" : psnr > 30 ? "OK ⚠️ (minor, inspect)" : "SEAMS ❌ (bump overlap)"
+    print(String(format: "TILE untiled vs .aggressive: maxPixelDiff=%d  PSNR=%.1f dB  →  %@", maxDiff, psnr, verdict))
+    print("Wrote tile-untiled.png and tile-tiled.png for visual inspection.")
+}
+
 func runGlue(full: Flux2Transformer2DModel) async throws {
     let prompt = "a red panda on a mossy rock, soft morning light, shallow depth of field"
     let seed: UInt64 = 42

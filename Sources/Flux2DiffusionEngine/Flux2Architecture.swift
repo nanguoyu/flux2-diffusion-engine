@@ -116,17 +116,13 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
             patchified, runningMean: vae.batchNormRunningMean, runningVar: vae.batchNormRunningVar)
         let vaeLatent = LatentUtils.unpatchifyLatents(denorm)
 
-        let decoded: MLXArray
-        #if os(iOS)
-        // Tile the dense mid-block-attention spike at >=1024 px (latent >=128); 512 stays untiled.
-        if vaeLatent.shape[2] >= 128 || vaeLatent.shape[3] >= 128 {
-            decoded = vae.decodeWithTiling(vaeLatent, tiling: .aggressive)
-        } else {
-            decoded = vae.decode(vaeLatent)
-        }
-        #else
-        decoded = vae.decode(vaeLatent)
-        #endif
+        // Untiled decode. The spatial-tiling path (decodeTiled) is numerically broken — clamped edge
+        // tiles give a non-uniform overlap, producing a wrong-sized (1152 vs 1024) seamed image — and
+        // spatial tiling is inherently seam-prone through the decoder's GroupNorm / conv receptive
+        // field anyway. The streaming engine frees the transformer before decode, so the full-frame
+        // decode has headroom; if the mid-block-attention spike still OOMs 1024 on-device, the correct
+        // fix is exact online-softmax chunking of that attention, not seam-prone spatial tiling.
+        let decoded = vae.decode(vaeLatent)
 
         guard let image = Flux2StreamingSupport.imageFromVAEOutput(decoded) else {
             throw EngineError.decodeFailed
