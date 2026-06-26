@@ -42,5 +42,9 @@ let package = Package(
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "/usr/lib"]),
             ]
         ),
+        .testTarget(
+            name: "Flux2DiffusionEngineTests",
+            dependencies: ["Flux2DiffusionEngine"]
+        ),
     ]
 )
