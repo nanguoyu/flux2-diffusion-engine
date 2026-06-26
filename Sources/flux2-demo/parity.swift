@@ -3,6 +3,8 @@ import CoreGraphics
 @preconcurrency import MLX
 import DiffusionCore
 import Flux2DiffusionEngine
+// Uses MLX.GPU.snapshot()/resetPeakMemory() for the TRUE GPU memory high-water-mark (the jetsam-relevant
+// number) rather than process RSS, which MLX's allocator never returns to the OS.
 
 // The 512 PARITY GATE: prove the block-streaming FLUX path (MLXDiffusionEngine + Flux2Architecture)
 // produces the same 512 image as the resident facade (Flux2Pipeline) at the same seed. Run on a Mac
@@ -69,15 +71,20 @@ func runParity() async throws {
 
     print("=== \(px) parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")) — prompt: \(prompt) ===")
 
-    // 1) Resident facade (the oracle).
-    print("[resident] loading facade…")
-    let facade = Flux2FacadeEngine(transformer: .bit4, encoder: .bit4, decoder: .small)
-    try await facade.load(model, variant: variant, source: NullWeightSource()) { _ in }
-    print("[resident] generating…")
-    let resident = try await facade.generate(
-        GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { _ in }
-    await facade.unload()
-    try writePNG(resident, to: URL(fileURLWithPath: "parity-resident.png"))
+    // 1) Resident facade (the oracle). --streamonly skips it for a CLEAN streaming memory profile (the
+    // facade's resident weights would otherwise inflate the process RSS the streamed run is measured in).
+    let streamOnly = args.contains("--streamonly")
+    var resident: CGImage? = nil
+    if !streamOnly {
+        print("[resident] loading facade…")
+        let facade = Flux2FacadeEngine(transformer: .bit4, encoder: .bit4, decoder: .small)
+        try await facade.load(model, variant: variant, source: NullWeightSource()) { _ in }
+        print("[resident] generating…")
+        resident = try await facade.generate(
+            GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { _ in }
+        await facade.unload()
+        if let resident { try writePNG(resident, to: URL(fileURLWithPath: "parity-resident.png")) }
+    }
 
     // 2) Streaming engine (the path under test).
     print("[streamed] loading MLXDiffusionEngine + Flux2Architecture…")
@@ -87,12 +94,20 @@ func runParity() async throws {
     let source = try Flux2ComponentSource.openKlein4BStreaming()
     try await streamed.load(model, variant: variant, source: source) { _ in }
     print("[streamed] generating…")
+    MLX.GPU.resetPeakMemory()
+    let t0 = Date()
     let streamedImage = try await streamed.generate(
         GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { _ in }
+    let dt = Date().timeIntervalSince(t0)
+    let snap = MLX.GPU.snapshot()
+    let gb = { (b: Int) in Double(b) / 1_073_741_824 }
+    print(String(format: "[streamed] %.1fs — MLX peak %.2f GB (active %.2f, cache %.2f) (evalK=%d, size=%d)",
+                 dt, gb(snap.peakMemory), gb(snap.activeMemory), gb(snap.cacheMemory), evalK, px))
     await streamed.unload()
     try writePNG(streamedImage, to: URL(fileURLWithPath: "parity-streamed.png"))
 
-    // 3) Compare.
+    // 3) Compare (skipped in --streamonly, where there is no resident oracle — just the profile above).
+    guard let resident else { return }
     let (maxDiff, psnr) = compareImages(resident, streamedImage)
     let verdict = psnr.isInfinite || psnr > 35 ? "PASS ✅" : "CHECK ⚠️ (encode/decode/VAE-variant divergence?)"
     print(String(format: "\(px) PARITY: maxPixelDiff=%d  PSNR=%.1f dB  →  %@", maxDiff, psnr, verdict))

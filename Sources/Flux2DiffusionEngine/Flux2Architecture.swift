@@ -54,10 +54,14 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
         return Conditioning(embeddings: embeddings)
     }
 
-    public func releaseTextEncoder() {
-        // Drop the strong ref so ARC frees the encoder's arrays (unload() is @MainActor and this hook
-        // is nonisolated); clearCache then returns the GPU memory before the transformer streams.
+    public func releaseTextEncoder() async {
+        // The ~2GB Qwen3-4B weights live in the @MainActor FluxTextEncoders singleton — niling the
+        // weightless KleinTextEncoder wrapper frees NOTHING. Hop to the main actor and actually unload
+        // it, AWAITED (the hook is async) so the encoder is reclaimed BEFORE the transformer streams.
+        // Without this the encoder co-resides with the streamed transformer + decode → jetsam on iPhone.
+        let enc = encoder
         encoder = nil
+        await MainActor.run { enc?.unload() }
         MLX.GPU.clearCache()
     }
 
@@ -65,6 +69,11 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
 
     public func initialLatent(size: ImageSize, seed: UInt64, reference: CGImage?, strength: Float,
                               source: WeightSource) throws -> MLXArray {
+        // The streaming path is text-to-image only. Fail loudly instead of silently dropping the
+        // reference and producing a T2I image (the facade's I2I encodes the reference as context).
+        guard reference == nil else {
+            throw EngineError.invalidRequest("image-to-image is not supported by the streaming FLUX path")
+        }
         let (vh, vw) = LatentUtils.validateDimensions(height: size.height, width: size.width)
         validHeight = vh; validWidth = vw
         // T2I: pure-noise patchified latent, packed to the transformer's sequence form. NO input
@@ -124,14 +133,17 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
         // Untiled decode. The spatial-tiling path (decodeTiled) is numerically broken — clamped edge
         // tiles give a non-uniform overlap, producing a wrong-sized (1152 vs 1024) seamed image — and
         // spatial tiling is inherently seam-prone through the decoder's GroupNorm / conv receptive
-        // field anyway. The streaming engine frees the transformer before decode, so the full-frame
-        // decode has headroom; if the mid-block-attention spike still OOMs 1024 on-device, the correct
-        // fix is exact online-softmax chunking of that attention, not seam-prone spatial tiling.
+        // field anyway. The decoder's dense mid-block attention is query-CHUNKED inside the VAE (exact,
+        // bounds the ~1.07GB 1024 score tile to ~67MB), so the full-frame decode is the memory-safe path.
         let decoded = vae.decode(vaeLatent)
 
         guard let image = Flux2StreamingSupport.imageFromVAEOutput(decoded) else {
             throw EngineError.decodeFailed
         }
+        // Free the VAE so it doesn't stay resident into the NEXT run's transformer streaming phase
+        // (re-loading the small decoder from local cache is cheap vs holding it through a stream).
+        self.vae = nil
+        MLX.GPU.clearCache()
         return image
     }
 

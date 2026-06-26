@@ -76,6 +76,13 @@ public final class Flux2StreamableBlock: StreamableBlock {
         // Stash the source; the per-block param swap happens in callAsFunction so loading all blocks
         // upfront (resident path) doesn't leave the shared shell holding only the last block's weights.
         self.source = source
+        if residentDouble != nil || residentSingle != nil { return }   // resident mode: nothing to fetch
+        // Probe this block's first weight so a missing/corrupt download throws HERE (load is a throwing
+        // context) instead of callAsFunction's swap silently failing and running the shared shell's
+        // PREVIOUS block weights — a wrong image with no error.
+        let prefix = isDouble ? "transformer_blocks.\(blockIndexInType)." : "single_transformer_blocks.\(blockIndexInType)."
+        let keys = isDouble ? Flux2Weights.doubleBlockDiskKeys() : Flux2Weights.singleBlockDiskKeys()
+        if let firstKey = keys.first { _ = try source.tensor(TensorKey(prefix + firstKey)) }
     }
 
     public func callAsFunction(_ x: MLXArray, conditioning: Conditioning, timestep: MLXArray) -> MLXArray {
