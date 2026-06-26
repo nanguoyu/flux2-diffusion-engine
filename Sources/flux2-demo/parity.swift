@@ -97,7 +97,16 @@ func runParity() async throws {
     MLX.GPU.resetPeakMemory()
     let t0 = Date()
     let streamedImage = try await streamed.generate(
-        GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { _ in }
+        GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { p in
+        // High-water (peak) so far, to localize WHICH phase drives the peak.
+        let pk = Double(MLX.GPU.peakMemory) / 1_073_741_824
+        switch p {
+        case .encoding:                  FileHandle.standardError.write(Data(String(format: "  [mem] encoding: peak-so-far %.2f GB\n", pk).utf8))
+        case .denoising(let s, _, _):    FileHandle.standardError.write(Data(String(format: "  [mem] denoise %d: peak-so-far %.2f GB\n", s, pk).utf8))
+        case .decoding:                  FileHandle.standardError.write(Data(String(format: "  [mem] decoding: peak-so-far %.2f GB\n", pk).utf8))
+        default: break
+        }
+    }
     let dt = Date().timeIntervalSince(t0)
     let snap = MLX.GPU.snapshot()
     let gb = { (b: Int) in Double(b) / 1_073_741_824 }
