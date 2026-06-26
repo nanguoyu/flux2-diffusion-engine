@@ -109,9 +109,14 @@ public final class Flux2Denoiser: Denoiser {
     }
 
     public func embed(latent: MLXArray, timestep: MLXArray, conditioning: Conditioning) -> MLXArray {
+        // The core engine passes a SCALAR timestep (`MLXArray(Float)`), but FLUX's time embedder
+        // expects a `[B]` shape — the resident pipeline feeds `MLXArray([sigma])`. A scalar produces a
+        // differently-shaped `temb` and a divergent (still coherent) denoise trajectory, so normalize
+        // to `[1]` to match the resident path exactly.
+        let ts = timestep.ndim == 0 ? timestep.reshaped([1]) : timestep
         let (hidden, ctx) = shell.streamEmbed(hiddenStates: latent,
                                               encoderHiddenStates: conditioning.embeddings,
-                                              timestep: timestep, guidance: nil,
+                                              timestep: ts, guidance: nil,
                                               imgIds: imgIds, txtIds: txtIds)
         holder.context = ctx
         return hidden

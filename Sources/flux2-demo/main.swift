@@ -54,7 +54,9 @@ func run() async throws {
 }
 
 do {
-    if CommandLine.arguments.dropFirst().contains("--parity") {
+    if CommandLine.arguments.dropFirst().contains("--diag") {
+        try await runDiag()
+    } else if CommandLine.arguments.dropFirst().contains("--parity") {
         try await runParity()
     } else {
         try await run()
