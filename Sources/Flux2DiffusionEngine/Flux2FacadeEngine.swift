@@ -335,6 +335,8 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     public func generate(_ request: GenerationRequest,
                          progress: @Sendable @escaping (GenerationProgress) -> Void) async throws -> CGImage {
         guard let pipeline else { throw EngineError.notLoaded }
+        pipeline.controlCheckpoint = { try request.control?.checkpoint() }
+        defer { pipeline.controlCheckpoint = nil }
         progress(.preparing)
         let image: CGImage
         if let reference = request.referenceImage {
