@@ -44,6 +44,24 @@ final class Flux2WeightsTests: XCTestCase {
         assertBijection(moduleKeys: moduleKeys, mapped: Set(map.values))
     }
 
+    func testSharedKeyCoverage() {
+        // The 0-block shell carries only the shared submodules. Quantize it and confirm every shared
+        // disk key lands on a real shell param (notFound==0) and every quantized shell Linear is
+        // covered (uncovered .scales==0). NOT a strict bijection: RoPE has recomputable buffers with
+        // no disk key, which is correct (they keep their computed init).
+        let shell = Flux2Transformer2DModel(config: Flux2Weights.shellConfig())
+        quantize(model: shell, groupSize: 64, bits: 4)
+        let moduleKeys = Set(shell.parameters().flattened().map { $0.0 })
+        let mapped = Set(Flux2Weights.sharedDiskKeys().map { Flux2WeightLoader.mapMLXQuantizedTransformerKey($0) })
+
+        let notFound = mapped.subtracting(moduleKeys)
+        XCTAssertEqual(notFound, [], "shared disk keys with no shell param: \(notFound.sorted())")
+        let uncoveredScales = Set(moduleKeys.filter { $0.hasSuffix(".scales") }).subtracting(mapped)
+        XCTAssertEqual(uncoveredScales, [], "quantized shell linears with no disk key: \(uncoveredScales.sorted())")
+        // The time embedder must nest under .timestepEmbedder. (the black-output gotcha).
+        XCTAssertTrue(moduleKeys.contains("timeGuidanceEmbed.timestepEmbedder.linear1.scales"))
+    }
+
     func testDiskKeyCounts() {
         // 12 quantized linears ×3 + 4 norms = 40 (double); 2 ×3 + 2 = 8 (single).
         XCTAssertEqual(Flux2Weights.doubleBlockDiskKeys().count, 40)

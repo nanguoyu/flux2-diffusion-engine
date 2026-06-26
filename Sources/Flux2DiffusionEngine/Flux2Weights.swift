@@ -72,6 +72,47 @@ public enum Flux2Weights {
                       diskKeys: singleBlockDiskKeys(), from: source, into: block, groupSize: groupSize, bits: bits)
     }
 
+    /// The 9 non-block quantized Linears (×3 = 27 tensors) shared by every step: the embedders, the
+    /// timestep/guidance embedder, the three modulation layers, the final norm and projection.
+    public static func sharedDiskKeys() -> [String] {
+        var keys: [String] = []
+        for base in ["context_embedder", "x_embedder", "proj_out", "norm_out.linear",
+                     "double_stream_modulation_img.linear", "double_stream_modulation_txt.linear",
+                     "single_stream_modulation.linear",
+                     "time_guidance_embed.linear_1", "time_guidance_embed.linear_2"] {
+            keys += ["\(base).weight", "\(base).scales", "\(base).biases"]
+        }
+        return keys
+    }
+
+    /// A Klein 4B transformer config with ZERO blocks — a lightweight "shell" carrying only the shared
+    /// submodules (for `streamEmbed`/`streamUnembed`) while the 25 blocks stream separately. Every
+    /// other dim matches `klein4B`, so the shared math is bit-identical to the resident model.
+    public static func shellConfig() -> Flux2TransformerConfig {
+        Flux2TransformerConfig(
+            patchSize: 1, inChannels: 128, outChannels: 128,
+            numLayers: 0, numSingleLayers: 0,
+            attentionHeadDim: 128, numAttentionHeads: 24,
+            jointAttentionDim: 7680, pooledProjectionDim: 768,
+            guidanceEmbeds: false, axesDimsRope: [32, 32, 32, 32], ropeTheta: 2000.0,
+            mlpRatio: 3.0, activationFunction: "silu")
+    }
+
+    /// Load the shared submodules of a 0-block shell from the transformer source. Quantizes the
+    /// shell's Linears (only the shared ones exist), then fetches each shared key by its mapped module
+    /// path. Recomputable params (RoPE tables) have no disk key and keep their computed init.
+    public static func loadShared(from source: WeightSource, into shell: Flux2Transformer2DModel,
+                                  groupSize: Int = 64, bits: Int = 4) throws {
+        quantize(model: shell, groupSize: groupSize, bits: bits)
+        var collected: [String: MLXArray] = [:]
+        for dk in sharedDiskKeys() {
+            let modulePath = Flux2WeightLoader.mapMLXQuantizedTransformerKey(dk)
+            guard let t = try? source.tensor(TensorKey(dk)) else { throw LoadError.missingTensor(dk) }
+            collected[modulePath] = t
+        }
+        shell.update(parameters: ModuleParameters.unflattened(collected))
+    }
+
     static func loadBlock(diskPrefix: String, modulePrefix: String, diskKeys: [String],
                           from source: WeightSource, into block: Module, groupSize: Int, bits: Int) throws {
         let map = try blockKeyMap(diskPrefix: diskPrefix, modulePrefix: modulePrefix, diskKeys: diskKeys)
