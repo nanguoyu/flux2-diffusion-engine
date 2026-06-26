@@ -1,5 +1,5 @@
 {
-  "originHash" : "2e0aa6e71a1c9b9a528763555906edb30fcc86eb4f6231fad5a36d492d11f579",
+  "originHash" : "2c40010b3722e4e64131a4d7053b1b567a7d9b0225c501e50aed5959b41e17e3",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -16,7 +16,7 @@
       "location" : "https://github.com/nanguoyu/flux-2-swift-mlx",
       "state" : {
         "branch" : "main",
-        "revision" : "5d36f8095a3c73506e1c1d4e3f112cdcf0b95b51"
+        "revision" : "cfaf8e8b4ff449a4d951cce4fe3ec93dcd47902f"
       }
     },
     {
