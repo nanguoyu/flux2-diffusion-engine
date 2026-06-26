@@ -54,7 +54,16 @@ func runParity() async throws {
     let size = ImageSize.square512
     let steps = 4
 
-    print("=== 512 parity gate (4-bit) — prompt: \(prompt) ===")
+    // Force the per-step block-STREAMING residency even on a Mac with plenty of RAM, by handing the
+    // engine a device whose budget lands klein4B in the streamingInternal band. This exercises the
+    // exact load→run→release→clearCache path the iPhone uses, so passing here validates the on-device
+    // mechanics (not just the resident path). Real RAM is ample, so it runs fine.
+    let forceStream = CommandLine.arguments.dropFirst().contains("--stream")
+    let device: DeviceTier = forceStream
+        ? DeviceTier(physicalMemoryBytes: 4_175_000_000, isPhone: false)
+        : .current
+
+    print("=== 512 parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")) — prompt: \(prompt) ===")
 
     // 1) Resident facade (the oracle).
     print("[resident] loading facade…")
@@ -69,7 +78,7 @@ func runParity() async throws {
     // 2) Streaming engine (the path under test).
     print("[streamed] loading MLXDiffusionEngine + Flux2Architecture…")
     let streamed = MLXDiffusionEngine(architecture: Flux2Architecture(),   // defaults to .smallDecoder
-                                      device: .current)
+                                      device: device)
     let source = try Flux2ComponentSource.openKlein4BStreaming()
     try await streamed.load(model, variant: variant, source: source) { _ in }
     print("[streamed] generating…")
