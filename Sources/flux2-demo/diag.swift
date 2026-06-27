@@ -141,16 +141,22 @@ func runTile() async throws {
     let vaeLatent = LatentUtils.unpatchifyLatents(denorm)
     print("TILE: VAE latent \(vaeLatent.shape) — decoding untiled vs .aggressive tiled…")
 
-    let untiled = vae.decode(vaeLatent)
-    let tiled = vae.decodeWithTiling(vaeLatent, tiling: .aggressive)
-    guard let imgU = Flux2StreamingSupport.imageFromVAEOutput(untiled),
-          let imgT = Flux2StreamingSupport.imageFromVAEOutput(tiled) else { print("TILE decode failed"); return }
+    let gb = { (b: Int) in Double(b) / 1_073_741_824 }
+    // Measure each decode in ISOLATION (clearCache + reset before each) so the first run's pool doesn't
+    // inflate the second's peak. Tiled first.
+    MLX.GPU.clearCache(); MLX.GPU.resetPeakMemory()
+    guard let imgT = Flux2StreamingSupport.imageFromVAEOutput(vae.decodeWithTiling(vaeLatent, tiling: .aggressive)) else { print("tiled decode failed"); return }
+    let tiledPeak = gb(MLX.GPU.peakMemory)
+    MLX.GPU.clearCache(); MLX.GPU.resetPeakMemory()
+    guard let imgU = Flux2StreamingSupport.imageFromVAEOutput(vae.decode(vaeLatent)) else { print("untiled decode failed"); return }
+    let untiledPeak = gb(MLX.GPU.peakMemory)
     try writePNG(imgU, to: URL(fileURLWithPath: "tile-untiled.png"))
     try writePNG(imgT, to: URL(fileURLWithPath: "tile-tiled.png"))
     let (maxDiff, psnr) = compareImages(imgU, imgT)
-    let verdict = psnr > 40 ? "CLEAN ✅ (no visible seams)" : psnr > 30 ? "OK ⚠️ (minor, inspect)" : "SEAMS ❌ (bump overlap)"
-    print(String(format: "TILE untiled vs .aggressive: maxPixelDiff=%d  PSNR=%.1f dB  →  %@", maxDiff, psnr, verdict))
-    print("Wrote tile-untiled.png and tile-tiled.png for visual inspection.")
+    let verdict = psnr > 40 ? "CLEAN ✅" : psnr > 30 ? "OK ⚠️ (inspect seams)" : "SEAMS ❌"
+    print(String(format: "TILE 1024: untiled-decode peak %.2f GB → tiled peak %.2f GB | tiled-vs-untiled PSNR %.1f dB maxΔ %d → %@",
+                 untiledPeak, tiledPeak, psnr, maxDiff, verdict))
+    print("Wrote tile-untiled.png and tile-tiled.png (both \(imgT.width)px) for visual inspection.")
 }
 
 func runGlue(full: Flux2Transformer2DModel) async throws {
