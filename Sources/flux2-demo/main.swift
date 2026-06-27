@@ -56,6 +56,8 @@ func run() async throws {
 do {
     if CommandLine.arguments.dropFirst().contains("--upscale") {
         try runUpscale()
+    } else if CommandLine.arguments.dropFirst().contains("--rgbfactors") {
+        try runRGBFactors()
     } else if CommandLine.arguments.dropFirst().contains("--tile") {
         try await runTile()
     } else if CommandLine.arguments.dropFirst().contains("--diag") {

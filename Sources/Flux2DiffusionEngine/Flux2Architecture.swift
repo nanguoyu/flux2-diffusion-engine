@@ -147,6 +147,43 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
         return image
     }
 
+    // MARK: - Cheap latent→RGB preview (no VAE) — shows the image forming during a long 1024 run
+
+    /// Best-fit linear map from the RAW (pre-denormalize) 32-channel latent to [-1,1] RGB, derived by
+    /// least-squares against the small-decoder VAE (`flux2-demo --rgbfactors`). 32 channel rows + a
+    /// trailing bias row. Fitting on the raw latent (not the denormalized VAE input) means the preview
+    /// needs no VAE stats mid-denoise — the affine denormalize is absorbed into these factors.
+    private static let latentRGBFactors: [[Float]] = [
+        [-0.00082, 0.00038, -0.00121], [-0.00323, -0.00342, -0.00124], [-0.00677, 0.00102, 0.00794],
+        [0.10611, 0.10842, 0.10765], [-0.00007, -0.00033, 0.00031], [-0.00238, -0.00074, -0.00145],
+        [-0.00648, 0.00867, -0.00536], [0.00095, 0.00021, 0.00066], [-0.10497, -0.10074, -0.09026],
+        [-0.00023, -0.00073, -0.00136], [-0.00217, -0.00096, -0.00155], [0.01906, -0.00040, -0.02527],
+        [0.00136, -0.00063, 0.00170], [-0.00179, -0.00112, -0.00033], [-0.00039, 0.00103, -0.00130],
+        [-0.00887, -0.00471, -0.00084], [-0.00031, -0.00043, -0.00092], [-0.00200, -0.00186, -0.00148],
+        [0.00098, 0.00028, 0.00024], [0.00945, 0.00564, 0.00647], [0.00050, 0.00005, 0.00103],
+        [0.00037, 0.00027, -0.00086], [-0.00013, -0.00136, -0.00043], [-0.00090, -0.00161, -0.00154],
+        [-0.00040, 0.00471, 0.00563], [-0.00124, -0.00106, 0.00044], [0.00089, 0.00121, 0.00262],
+        [-0.00203, 0.00023, -0.00559], [0.00169, -0.00053, 0.00278], [-0.00534, -0.00025, 0.00509],
+        [0.00159, 0.00022, 0.00149], [0.00388, 0.00182, 0.00012],
+        [-0.04801, -0.11393, -0.21683],   // bias (row 33)
+    ]
+
+    public func latentPreview(_ latent: MLXArray) -> CGImage? {
+        guard validHeight > 0, validWidth > 0 else { return nil }
+        // Unpack the packed in-loop latent to the spatial VAE-latent grid [1, 32, H/8, W/8]; NO
+        // denormalize, NO VAE — the linear factors approximate the whole decode.
+        let patchified = LatentUtils.unpackSequenceToPatchified(latent, height: validHeight, width: validWidth)
+        let z = LatentUtils.unpatchifyLatents(patchified)               // [1, 32, h, w]
+        let h = z.shape[2], w = z.shape[3]
+        let factors = Self.latentRGBFactors
+        let matrix = MLXArray(factors.prefix(32).flatMap { $0 }).reshaped([32, 3]).asType(z.dtype)
+        let bias = MLXArray(factors[32]).reshaped([3, 1]).asType(z.dtype)
+        let zf = z.squeezed(axis: 0).reshaped([32, h * w])             // [32, h·w]
+        let rgb = matrix.transposed(1, 0).matmul(zf) + bias            // [3, h·w]
+        let hwc = rgb.reshaped([3, h, w]).transposed(1, 2, 0).asType(.float32)   // [h, w, 3]
+        return ImageConversion.cgImage(fromHWC: hwc, range: .signed)
+    }
+
     public func releaseCachedResources() {
         encoder = nil
         vae = nil
