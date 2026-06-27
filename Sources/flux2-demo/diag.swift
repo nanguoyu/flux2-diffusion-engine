@@ -110,9 +110,14 @@ func runDiag() async throws {
 /// (.aggressive, the iPhone path) and compare. High PSNR = the tiling that kills the decode memory
 /// spike doesn't introduce visible seams. The Mac parity runs untiled, so this is the one
 /// iPhone-specific path it doesn't otherwise cover.
-func runTile() async throws {
+/// Denoise a 1024 latent, then FREE the transformer + text encoder before returning. The returned
+/// latent is eval'd so it no longer references the transformer weights — so they (and the encoder's
+/// ~2GB @MainActor singleton) deallocate on return. This is what the streaming engine does on the real
+/// path (stream+release the blocks, unload the encoder) before decoding, so the decode peak measured
+/// after this is the TRUE decode-only working set, not decode + ~4.5GB of resident model clutter.
+private func denoise1024Packed() async throws -> MLXArray? {
     guard let dir = Flux2ModelDownloader.findModelPath(for: .transformer(.klein4B_4bit)) else {
-        print("transformer not downloaded — run `swift run flux2-demo` once first"); return
+        print("transformer not downloaded — run `swift run flux2-demo` once first"); return nil
     }
     let full = Flux2Transformer2DModel(config: .klein4B)
     quantize(model: full, groupSize: 64, bits: 4)
@@ -134,29 +139,41 @@ func runTile() async throws {
                        guidance: nil, imgIds: imageIds, txtIds: textIds)
         packed = packed + (sigmas[i + 1] - sigmas[i]) * vel
     }
+    eval(packed)                              // cut the graph so the transformer weights can free
+    await MainActor.run { enc.unload() }       // free the ~2GB Qwen3 singleton (as the real path does)
+    return packed                              // `full` + `weights` deallocate here
+}
+
+func runTile() async throws {
+    guard let packed = try await denoise1024Packed() else { return }
+    MLX.GPU.clearCache()                        // return the freed transformer/encoder pool to MLX
+    let (vh, vw) = LatentUtils.validateDimensions(height: 1024, width: 1024)
     let vae = try Flux2StreamingSupport.loadVAE(variant: .smallDecoder)
     let finalPatch = LatentUtils.unpackSequenceToPatchified(packed, height: vh, width: vw)
     let denorm = LatentUtils.denormalizeLatentsWithBatchNorm(
         finalPatch, runningMean: vae.batchNormRunningMean, runningVar: vae.batchNormRunningVar)
     let vaeLatent = LatentUtils.unpatchifyLatents(denorm)
-    print("TILE: VAE latent \(vaeLatent.shape) — decoding untiled vs .aggressive tiled…")
+    print("TILE: VAE latent \(vaeLatent.shape) — decoding full-frame (reference) vs conv-striped (transformer+encoder freed)…")
 
     let gb = { (b: Int) in Double(b) / 1_073_741_824 }
     // Measure each decode in ISOLATION (clearCache + reset before each) so the first run's pool doesn't
-    // inflate the second's peak. Tiled first.
+    // inflate the second's peak. The striped decode is the iPhone fix; the full-frame decode (striping
+    // OFF) is the bit-exact reference it must reproduce.
+    VAEDecoder.stripeHeavyConvs = false
     MLX.GPU.clearCache(); MLX.GPU.resetPeakMemory()
-    guard let imgT = Flux2StreamingSupport.imageFromVAEOutput(vae.decodeWithTiling(vaeLatent, tiling: .aggressive)) else { print("tiled decode failed"); return }
-    let tiledPeak = gb(MLX.GPU.peakMemory)
+    guard let imgRef = Flux2StreamingSupport.imageFromVAEOutput(vae.decode(vaeLatent)) else { print("full-frame decode failed"); return }
+    let fullPeak = gb(MLX.GPU.peakMemory)
+    VAEDecoder.stripeHeavyConvs = true
     MLX.GPU.clearCache(); MLX.GPU.resetPeakMemory()
-    guard let imgU = Flux2StreamingSupport.imageFromVAEOutput(vae.decode(vaeLatent)) else { print("untiled decode failed"); return }
-    let untiledPeak = gb(MLX.GPU.peakMemory)
-    try writePNG(imgU, to: URL(fileURLWithPath: "tile-untiled.png"))
-    try writePNG(imgT, to: URL(fileURLWithPath: "tile-tiled.png"))
-    let (maxDiff, psnr) = compareImages(imgU, imgT)
-    let verdict = psnr > 40 ? "CLEAN ✅" : psnr > 30 ? "OK ⚠️ (inspect seams)" : "SEAMS ❌"
-    print(String(format: "TILE 1024: untiled-decode peak %.2f GB → tiled peak %.2f GB | tiled-vs-untiled PSNR %.1f dB maxΔ %d → %@",
-                 untiledPeak, tiledPeak, psnr, maxDiff, verdict))
-    print("Wrote tile-untiled.png and tile-tiled.png (both \(imgT.width)px) for visual inspection.")
+    guard let imgS = Flux2StreamingSupport.imageFromVAEOutput(vae.decode(vaeLatent)) else { print("striped decode failed"); return }
+    let stripedPeak = gb(MLX.GPU.peakMemory)
+    try writePNG(imgRef, to: URL(fileURLWithPath: "tile-fullframe.png"))
+    try writePNG(imgS, to: URL(fileURLWithPath: "tile-striped.png"))
+    let (maxDiff, psnr) = compareImages(imgRef, imgS)
+    let verdict = psnr.isInfinite || maxDiff == 0 ? "EXACT ✅" : psnr > 50 ? "≈exact ✅" : "DIVERGES ❌"
+    print(String(format: "TILE 1024: full-frame peak %.2f GB → striped peak %.2f GB (%.0f%% lower) | striped-vs-fullframe PSNR %.1f dB maxΔ %d → %@",
+                 fullPeak, stripedPeak, (1 - stripedPeak / fullPeak) * 100, psnr, maxDiff, verdict))
+    print("Wrote tile-fullframe.png and tile-striped.png (both \(imgS.width)px) for visual inspection.")
 }
 
 func runGlue(full: Flux2Transformer2DModel) async throws {
