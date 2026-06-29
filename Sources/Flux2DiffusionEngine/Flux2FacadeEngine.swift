@@ -347,11 +347,16 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         }
         progress(.preparing)
         let image: CGImage
-        if let reference = request.referenceImage {
-            // image-to-image: FLUX.2 takes the reference image(s) directly.
+        // FLUX.2 reference-context i2i: 1–3 reference images encoded + concatenated into the
+        // transformer sequence (NOT strength-based noise injection). Prefer the multi-image array;
+        // fall back to the single `referenceImage`. Capped at 3 (the pipeline's limit).
+        let refs = Array((request.referenceImages.isEmpty
+                          ? request.referenceImage.map { [$0] } ?? []
+                          : request.referenceImages).prefix(3))
+        if !refs.isEmpty {
             image = try await pipeline.generateImageToImage(
                 prompt: request.prompt,
-                images: [reference],
+                images: refs,
                 height: request.size.height,
                 width: request.size.width,
                 steps: request.steps,
