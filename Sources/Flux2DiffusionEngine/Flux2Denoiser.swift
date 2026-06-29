@@ -119,10 +119,17 @@ public final class Flux2Denoiser: Denoiser {
     private let holder: Flux2StreamHolder
     private let imgIds: MLXArray
     private let txtIds: MLXArray
+    /// i2i only: the static reference tokens `[1, refSeq, 128]`, appended to the output latent each
+    /// step (the resident path re-concatenates every step too). `nil` ⇒ text-to-image.
+    private let refLatents: MLXArray?
+    /// i2i only: the OUTPUT token count, so `streamUnembed` returns just the output velocity (matching
+    /// the stepped latent's shape). `nil` ⇒ text-to-image (every image token is output).
+    private let outputSeqLen: Int?
 
     public init(shell: Flux2Transformer2DModel, holder: Flux2StreamHolder,
                 blocks: [any StreamableBlock], imgIds: MLXArray, txtIds: MLXArray,
-                doubleShell: Flux2TransformerBlock? = nil, singleShell: Flux2SingleTransformerBlock? = nil) {
+                doubleShell: Flux2TransformerBlock? = nil, singleShell: Flux2SingleTransformerBlock? = nil,
+                refLatents: MLXArray? = nil, outputSeqLen: Int? = nil) {
         self.shell = shell
         self.holder = holder
         self.blocks = blocks
@@ -130,6 +137,8 @@ public final class Flux2Denoiser: Denoiser {
         self.txtIds = txtIds
         self.doubleShell = doubleShell
         self.singleShell = singleShell
+        self.refLatents = refLatents
+        self.outputSeqLen = outputSeqLen
     }
 
     public func embed(latent: MLXArray, timestep: MLXArray, conditioning: Conditioning) -> MLXArray {
@@ -138,10 +147,14 @@ public final class Flux2Denoiser: Denoiser {
         // differently-shaped `temb` and a divergent (still coherent) denoise trajectory, so normalize
         // to `[1]` to match the resident path exactly.
         let ts = timestep.ndim == 0 ? timestep.reshaped([1]) : timestep
-        let (hidden, ctx) = shell.streamEmbed(hiddenStates: latent,
+        // i2i: pack the image stream as `[output ; reference]` (output FIRST, matching the resident
+        // path and the combined `imgIds`). `imgIds` already covers output+reference; `outputSeqLen`
+        // tells `streamUnembed` to slice the output velocity back out.
+        let img = refLatents.map { concatenated([latent, $0], axis: 1) } ?? latent
+        let (hidden, ctx) = shell.streamEmbed(hiddenStates: img,
                                               encoderHiddenStates: conditioning.embeddings,
                                               timestep: ts, guidance: nil,
-                                              imgIds: imgIds, txtIds: txtIds)
+                                              imgIds: imgIds, txtIds: txtIds, outputSeqLen: outputSeqLen)
         holder.context = ctx
         return hidden
     }

@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import ImageIO
 @preconcurrency import MLX
 import DiffusionCore
 import Flux2DiffusionEngine
@@ -48,6 +49,45 @@ func compareImages(_ a: CGImage, _ b: CGImage) -> (maxDiff: Int, psnr: Double) {
     return (maxDiff, psnr)
 }
 
+/// A deterministic 512×512 reference for the i2i parity gate. A smooth RGB gradient with a diagonal
+/// band — structured enough to exercise the VAE encoder, and reproducible so both engines see identical
+/// pixels. 512×512 is deliberate: the facade caps references at 1024² and the streamed path at 512², so
+/// a 512² reference is below BOTH caps and encodes identically on both sides → a TIGHT numerical parity.
+func makeSyntheticReference(_ side: Int = 512) -> CGImage {
+    var data = [UInt8](repeating: 0, count: side * side * 4)
+    for y in 0 ..< side {
+        for x in 0 ..< side {
+            let i = (y * side + x) * 4
+            data[i + 0] = UInt8(x * 255 / (side - 1))                 // R ramps with x
+            data[i + 1] = UInt8(y * 255 / (side - 1))                 // G ramps with y
+            data[i + 2] = UInt8(((x + y) / 2) * 255 / (side - 1))     // B on the diagonal
+            data[i + 3] = 255
+        }
+    }
+    let ctx = CGContext(data: &data, width: side, height: side, bitsPerComponent: 8,
+                        bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    return ctx.makeImage()!
+}
+
+/// The i2i reference: `--ref <path>` redrawn to `side`×`side` (so facade & streamed encode identical
+/// pixels), else the synthetic gradient. Always squared to `side` to keep the parity tight.
+func loadReference(side: Int = 512) -> CGImage {
+    let args = Array(CommandLine.arguments.dropFirst())
+    if let i = args.firstIndex(of: "--ref"), args.indices.contains(i + 1),
+       let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: args[i + 1]) as CFURL, nil),
+       let img = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+        var data = [UInt8](repeating: 0, count: side * side * 4)
+        let ctx = CGContext(data: &data, width: side, height: side, bitsPerComponent: 8,
+                            bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.interpolationQuality = .high
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: side, height: side))
+        return ctx.makeImage()!
+    }
+    return makeSyntheticReference(side)
+}
+
 func runParity() async throws {
     let prompt = "a red panda on a mossy rock, soft morning light, shallow depth of field"
     let seed: UInt64 = 42
@@ -60,6 +100,13 @@ func runParity() async throws {
     let size = ImageSize(width: px, height: px)
     let steps = 4
 
+    // --i2i: drive reference-context image-to-image through BOTH engines with the SAME 512² reference.
+    // The streamed path appends the reference tokens to the output stream and slices the output velocity
+    // back out (outputSeqLen); the facade does the resident equivalent. A 512² reference encodes
+    // identically on both, so the comparison stays a tight numerical parity rather than a vibe check.
+    let i2i = args.contains("--i2i")
+    let reference: CGImage? = i2i ? loadReference(side: 512) : nil
+
     // Force the per-step block-STREAMING residency even on a Mac with plenty of RAM, by handing the
     // engine a device whose budget lands klein4B in the streamingInternal band. This exercises the
     // exact load→run→release→clearCache path the iPhone uses, so passing here validates the on-device
@@ -69,7 +116,7 @@ func runParity() async throws {
         ? DeviceTier(physicalMemoryBytes: 4_175_000_000, isPhone: false)
         : .current
 
-    print("=== \(px) parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")) — prompt: \(prompt) ===")
+    print("=== \(px) parity gate (4-bit\(forceStream ? ", FORCED STREAMING" : "")\(i2i ? ", I2I (512² ref)" : "")) — prompt: \(prompt) ===")
 
     // 1) Resident facade (the oracle). --streamonly skips it for a CLEAN streaming memory profile (the
     // facade's resident weights would otherwise inflate the process RSS the streamed run is measured in).
@@ -81,7 +128,8 @@ func runParity() async throws {
         try await facade.load(model, variant: variant, source: NullWeightSource()) { _ in }
         print("[resident] generating…")
         resident = try await facade.generate(
-            GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { _ in }
+            GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size,
+                              referenceImages: reference.map { [$0] } ?? [])) { _ in }
         await facade.unload()
         if let resident { try writePNG(resident, to: URL(fileURLWithPath: "parity-resident.png")) }
     }
@@ -97,7 +145,8 @@ func runParity() async throws {
     MLX.GPU.resetPeakMemory()
     let t0 = Date()
     let streamedImage = try await streamed.generate(
-        GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size)) { p in
+        GenerationRequest(prompt: prompt, steps: steps, seed: seed, size: size,
+                          referenceImage: reference)) { p in
         // High-water (peak) so far, to localize WHICH phase drives the peak.
         let pk = Double(MLX.GPU.peakMemory) / 1_073_741_824
         switch p {

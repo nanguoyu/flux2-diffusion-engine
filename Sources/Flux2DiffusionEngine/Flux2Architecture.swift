@@ -33,6 +33,16 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
     private var imgIds: MLXArray?
     private var validHeight = 0, validWidth = 0
 
+    // i2i (reference-context) state, set in `initialLatent` and read by `makeDenoiser`. `refLatents`
+    // nil ⇒ text-to-image. The output latent the engine steps stays output-only; the reference tokens
+    // are appended transiently inside the denoiser's per-step embed, so decode/preview are unaffected.
+    private var refLatents: MLXArray?
+    private var outputSeqLen: Int?
+    /// iPhone i2i reference-token budget: cap each reference to 512² (≈1024 tokens) so the streamed
+    /// sequence (output 1024 + ref ≤1024 = ≤2048) stays well under the proven 4096-token T2I-1024 that
+    /// already fits the phone at 3.83GB. The resident facade default is 1024² (≈4096) — too heavy here.
+    private static let referenceMaxImageArea = 512 * 512
+
     public init(vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) {
         self.vaeVariant = vaeVariant
     }
@@ -69,21 +79,38 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
 
     public func initialLatent(size: ImageSize, seed: UInt64, reference: CGImage?, strength: Float,
                               source: WeightSource) throws -> MLXArray {
-        // The streaming path is text-to-image only. Fail loudly instead of silently dropping the
-        // reference and producing a T2I image (the facade's I2I encodes the reference as context).
-        guard reference == nil else {
-            throw EngineError.invalidRequest("image-to-image is not supported by the streaming FLUX path")
-        }
         let (vh, vw) = LatentUtils.validateDimensions(height: size.height, width: size.width)
         validHeight = vh; validWidth = vw
-        // T2I: pure-noise patchified latent, packed to the transformer's sequence form. NO input
+        // Pure-noise patchified OUTPUT latent, packed to the transformer's sequence form. NO input
         // normalize (denormalize-only happens at decode) — normalizing pure noise would corrupt it.
+        // The output denoises from pure noise in BOTH T2I and reference-context i2i (strength is 1.0).
         let patchified = LatentUtils.generatePatchifiedLatents(height: vh, width: vw, seed: seed)
         let packed = LatentUtils.packPatchifiedToSequence(patchified)
-        // Both position-id sets, generated together exactly as the resident T2I path does.
-        let (textIds, imageIds, _) = LatentUtils.combinePositionIDs(textLength: textLength, height: vh, width: vw)
+        let (textIds, outputImageIds, _) = LatentUtils.combinePositionIDs(textLength: textLength, height: vh, width: vw)
         txtIds = textIds
-        imgIds = imageIds
+
+        guard let reference else {
+            // Text-to-image: the image stream is output-only.
+            refLatents = nil
+            outputSeqLen = nil
+            imgIds = outputImageIds
+            return packed
+        }
+
+        // Image-to-image (reference-context): VAE-encode the reference as conditioning, capped to the
+        // iPhone streaming token budget. Its tokens are APPENDED after the output `[output ; ref]`
+        // (output FIRST, matching the resident path + the velocity slice), with distinct T-coordinate
+        // position-ids so the transformer separates reference from output. The output denoises from
+        // pure noise while attending to the reference. The encoder VAE is freed before the transformer
+        // streams, so there is no VAE ↔ transformer co-residency on the phone.
+        var refVAE: AutoencoderKLFlux2? = try Flux2StreamingSupport.loadVAE(variant: vaeVariant)
+        let (refLat, refIds) = Flux2StreamingSupport.encodeReferenceImage(
+            reference, maxImageArea: Self.referenceMaxImageArea, vae: refVAE!)
+        refVAE = nil               // drop the encoder VAE; refLat is already materialized (eval'd)
+        MLX.GPU.clearCache()
+        refLatents = refLat
+        outputSeqLen = packed.shape[1]
+        imgIds = concatenated([outputImageIds, refIds], axis: 0)
         return packed
     }
 
@@ -116,7 +143,8 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
                                                approximateBytes: 70_000_000, holder: holder))
         }
         return Flux2Denoiser(shell: shell, holder: holder, blocks: blocks, imgIds: imgIds, txtIds: txtIds,
-                             doubleShell: doubleShell, singleShell: singleShell)
+                             doubleShell: doubleShell, singleShell: singleShell,
+                             refLatents: refLatents, outputSeqLen: outputSeqLen)
     }
 
     // MARK: - Decode (VAE), transformer already freed by the engine's two-phase staging
@@ -187,6 +215,10 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
     public func releaseCachedResources() {
         encoder = nil
         vae = nil
+        // Drop any i2i reference tokens too, so an unloaded engine doesn't keep the ~0.5MB reference
+        // latent (and a stale imgIds) resident until the next run re-enters initialLatent.
+        refLatents = nil
+        outputSeqLen = nil
         MLX.GPU.clearCache()
     }
 }
