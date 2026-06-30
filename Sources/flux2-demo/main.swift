@@ -64,6 +64,8 @@ do {
         try await runDiag()
     } else if CommandLine.arguments.dropFirst().contains("--parity") {
         try await runParity()
+    } else if CommandLine.arguments.dropFirst().contains("--i2itest") {
+        try await runI2ITest()
     } else {
         try await run()
     }

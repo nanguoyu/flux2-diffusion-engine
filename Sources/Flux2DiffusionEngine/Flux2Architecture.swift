@@ -38,10 +38,11 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
     // are appended transiently inside the denoiser's per-step embed, so decode/preview are unaffected.
     private var refLatents: MLXArray?
     private var outputSeqLen: Int?
-    /// iPhone i2i reference-token budget: cap each reference to 512² (≈1024 tokens) so the streamed
-    /// sequence (output 1024 + ref ≤1024 = ≤2048) stays well under the proven 4096-token T2I-1024 that
-    /// already fits the phone at 3.83GB. The resident facade default is 1024² (≈4096) — too heavy here.
-    private static let referenceMaxImageArea = 512 * 512
+    /// iPhone i2i reference-token budget: 768² (≈2304 tokens). 512² (≈1024) was lighter but starved the
+    /// model of edge detail, so it painted a ~5px gray frame around a flat background; 768² clears that
+    /// (down to a ~1px hairline, like the resident facade) while the streamed sequence (output 1024 + ref
+    /// 2304 = 3328) still stays UNDER the proven 4096-token T2I-1024 that fits the phone at 3.83GB.
+    private static let referenceMaxImageArea = 768 * 768
 
     public init(vaeVariant: ModelRegistry.VAEVariant = .smallDecoder) {
         self.vaeVariant = vaeVariant

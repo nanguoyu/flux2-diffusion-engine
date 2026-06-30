@@ -33,6 +33,7 @@ let package = Package(
             dependencies: [
                 "Flux2DiffusionEngine",
                 .product(name: "DiffusionCore", package: "swift-diffusion-core"),
+                .product(name: "Flux2Core", package: "flux-2-swift-mlx"),
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             linkerSettings: [
