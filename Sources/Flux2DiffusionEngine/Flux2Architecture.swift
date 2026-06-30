@@ -198,13 +198,18 @@ public final class Flux2Architecture: DiffusionArchitecture, @unchecked Sendable
     ]
 
     public func latentPreview(_ latent: MLXArray) -> CGImage? {
-        guard validHeight > 0, validWidth > 0 else { return nil }
-        // Unpack the packed in-loop latent to the spatial VAE-latent grid [1, 32, H/8, W/8]; NO
-        // denormalize, NO VAE — the linear factors approximate the whole decode.
-        let patchified = LatentUtils.unpackSequenceToPatchified(latent, height: validHeight, width: validWidth)
+        Self.previewCGImage(latent, height: validHeight, width: validWidth)
+    }
+
+    /// The latent→RGB preview as a `static` so the RESIDENT facade (which has no architecture instance)
+    /// can reuse the exact same mapping. Unpacks a packed in-loop latent to the spatial VAE-latent grid
+    /// and applies the baked linear factors — NO denormalize, NO VAE.
+    static func previewCGImage(_ latent: MLXArray, height: Int, width: Int) -> CGImage? {
+        guard height > 0, width > 0 else { return nil }
+        let patchified = LatentUtils.unpackSequenceToPatchified(latent, height: height, width: width)
         let z = LatentUtils.unpatchifyLatents(patchified)               // [1, 32, h, w]
         let h = z.shape[2], w = z.shape[3]
-        let factors = Self.latentRGBFactors
+        let factors = latentRGBFactors
         let matrix = MLXArray(factors.prefix(32).flatMap { $0 }).reshaped([32, 3]).asType(z.dtype)
         let bias = MLXArray(factors[32]).reshaped([3, 1]).asType(z.dtype)
         let zf = z.squeezed(axis: 0).reshaped([32, h * w])             // [32, h·w]

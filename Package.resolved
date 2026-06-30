@@ -1,5 +1,5 @@
 {
-  "originHash" : "2c40010b3722e4e64131a4d7053b1b567a7d9b0225c501e50aed5959b41e17e3",
+  "originHash" : "b45ed29599923bd7ee02962f0a7a1a4edfa79403d2f81f51a03481e68aef54eb",
   "pins" : [
     {
       "identity" : "eventsource",
@@ -16,7 +16,7 @@
       "location" : "https://github.com/nanguoyu/flux-2-swift-mlx",
       "state" : {
         "branch" : "main",
-        "revision" : "de8db54f40ecb950f8d0d037c3ca0a300e85280a"
+        "revision" : "5d2ec1b83cf25be65ad2108e81e9697fb460dfcd"
       }
     },
     {
@@ -79,7 +79,7 @@
       "location" : "https://github.com/nanguoyu/swift-diffusion-core",
       "state" : {
         "branch" : "main",
-        "revision" : "c0e8f43e4798439505a972f24dba5f6b502b4f4c"
+        "revision" : "8dbe650f930e8bc8e548e5fdccde167d6d0e061b"
       }
     },
     {

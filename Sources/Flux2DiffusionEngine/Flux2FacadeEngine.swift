@@ -341,9 +341,18 @@ public actor Flux2FacadeEngine: DiffusionEngine {
         pipeline.thermalThrottle = {
             try await ThermalGovernor.shared.throttleIfNeeded { progress(.cooling) }
         }
+        // Latent preview: map each step's x0-prediction to an RGB image so the canvas shows the picture
+        // forming. The resident facade used to emit `preview: nil` → a blank canvas for the whole run
+        // (every macOS render + iPhone-512). Held in a reference box read by the progress callback.
+        let ph = request.size.height, pw = request.size.width
+        let preview = FacadePreviewHolder()
+        pipeline.onPreviewLatent = { x0 in
+            preview.image = Flux2Architecture.previewCGImage(x0, height: ph, width: pw)
+        }
         defer {
             pipeline.controlCheckpoint = nil
             pipeline.thermalThrottle = nil
+            pipeline.onPreviewLatent = nil
         }
         progress(.preparing)
         let image: CGImage
@@ -363,7 +372,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                 guidance: request.guidance,
                 seed: request.seed,
                 onProgress: { current, total in
-                    progress(.denoising(step: current, total: total, preview: nil))
+                    progress(.denoising(step: current, total: total, preview: preview.image))
                 })
         } else {
             image = try await pipeline.generateTextToImage(
@@ -374,7 +383,7 @@ public actor Flux2FacadeEngine: DiffusionEngine {
                 guidance: request.guidance,
                 seed: request.seed,
                 onProgress: { current, total in
-                    progress(.denoising(step: current, total: total, preview: nil))
+                    progress(.denoising(step: current, total: total, preview: preview.image))
                 })
         }
         progress(.finished(image))
@@ -382,4 +391,11 @@ public actor Flux2FacadeEngine: DiffusionEngine {
     }
 
     public func unload() async { pipeline = nil }
+}
+
+/// Holds the latest latent preview so the pipeline's per-step `onPreviewLatent` hook and the progress
+/// callback (two separate closures) share it without a mutable capture. The denoise loop calls them
+/// sequentially within one step, so there's no real concurrency — `@unchecked Sendable` is safe.
+private final class FacadePreviewHolder: @unchecked Sendable {
+    var image: CGImage?
 }
